@@ -67,7 +67,8 @@ namespace libtorrent {
 using namespace std::placeholders;
 
 // used to build SOCKS messages in
-std::size_t const tmp_buffer_size = 270;
+// RFC 1929 permits both a 255-byte username and a 255-byte password.
+std::size_t const tmp_buffer_size = 513;
 
 // used for SOCKS5 UDP wrapper header
 std::size_t const max_header_size = 255;
@@ -543,6 +544,14 @@ void udp_socket::set_proxy_settings(aux::proxy_settings const& ps
 void socks5::start(aux::proxy_settings const& ps)
 {
 	m_proxy_settings = ps;
+	if (ps.username.size() > 255 || ps.password.size() > 255
+		|| (ps.require_authentication && (ps.username.empty() || ps.password.empty())))
+	{
+		if (m_alerts.should_post<socks5_alert>())
+			m_alerts.emplace_alert<socks5_alert>(m_listen_socket.get_local_endpoint()
+				, operation_t::handshake, socks_error::authentication_error);
+		return;
+	}
 
 	ADD_OUTSTANDING_ASYNC("socks5::on_name_lookup");
 	m_proxy_addr.port(ps.port);
@@ -712,7 +721,12 @@ void socks5::on_connected(error_code const& e)
 	// send SOCKS5 authentication methods
 	char* p = m_tmp_buf.data();
 	write_uint8(5, p); // SOCKS VERSION 5
-	if (m_proxy_settings.username.empty()
+	if (m_proxy_settings.require_authentication)
+	{
+		write_uint8(1, p);
+		write_uint8(2, p); // username/password only
+	}
+	else if (m_proxy_settings.username.empty()
 		|| m_proxy_settings.type == settings_pack::socks5)
 	{
 		write_uint8(1, p); // 1 authentication method (no auth)
@@ -769,7 +783,7 @@ void socks5::handshake2(error_code const& e)
 	int const version = read_uint8(p);
 	int const method = read_uint8(p);
 
-	if (version < 5)
+	if (version < 5 || (m_proxy_settings.require_authentication && version != 5))
 	{
 		if (m_alerts.should_post<socks5_alert>())
 			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
@@ -779,6 +793,15 @@ void socks5::handshake2(error_code const& e)
 		return;
 	}
 
+	if (m_proxy_settings.require_authentication && method != 2)
+	{
+		if (m_alerts.should_post<socks5_alert>())
+			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
+				, socks_error::unsupported_authentication_method);
+		error_code ec;
+		m_socks5_sock.close(ec);
+		return;
+	}
 	if (method == 0)
 	{
 		socks_forward_udp(/*l*/);
@@ -804,7 +827,7 @@ void socks5::handshake2(error_code const& e)
 		TORRENT_ASSERT(m_proxy_settings.password.size() < 0x100);
 		write_uint8(uint8_t(m_proxy_settings.password.size()), p);
 		write_string(m_proxy_settings.password, p);
-		TORRENT_ASSERT_VAL(p - m_tmp_buf.data() < int(m_tmp_buf.size()), (p - m_tmp_buf.data()));
+		TORRENT_ASSERT_VAL(p - m_tmp_buf.data() <= int(m_tmp_buf.size()), (p - m_tmp_buf.data()));
 		ADD_OUTSTANDING_ASYNC("socks5::on_handshake3");
 		boost::asio::async_write(m_socks5_sock
 			, boost::asio::buffer(m_tmp_buf.data(), aux::numeric_cast<std::size_t>(p - m_tmp_buf.data()))
@@ -859,7 +882,16 @@ void socks5::handshake4(error_code const& e)
 	int const version = read_uint8(p);
 	int const status = read_uint8(p);
 
-	if (version != 1 || status != 0) return;
+	if (version != 1 || status != 0)
+	{
+		if (m_alerts.should_post<socks5_alert>())
+			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
+				, version != 1 ? socks_error::unsupported_authentication_version
+				: socks_error::authentication_error);
+		error_code ec;
+		m_socks5_sock.close(ec);
+		return;
+	}
 
 	socks_forward_udp(/*l*/);
 }

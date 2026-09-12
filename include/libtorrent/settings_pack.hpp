@@ -1018,6 +1018,12 @@ namespace aux {
 			// protocol may not be valid from the proxy's point of view.
 			socks5_udp_send_local_ep,
 
+			// Require RFC 1929 authentication on SOCKS5 connections, including
+			// UDP associations. No-auth negotiation is rejected. Defaults to false
+			// to preserve ordinary proxy compatibility. Enable for private payload
+			// listeners whose credentials are an access-control boundary.
+			proxy_require_authentication,
+
 			max_bool_setting_internal
 		};
 

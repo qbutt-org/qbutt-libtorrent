@@ -239,6 +239,7 @@ constexpr int DISK_WRITE_MODE = settings_pack::enable_os_cache;
 		SET(allow_idna, false, nullptr),
 		SET(enable_set_file_valid_data, false, nullptr),
 		SET(socks5_udp_send_local_ep, false, nullptr),
+		SET(proxy_require_authentication, false, &session_impl::update_proxy),
 	}});
 
 	CONSTEXPR_SETTINGS

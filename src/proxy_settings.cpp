@@ -51,6 +51,7 @@ void init(proxy_settings& p, Settings const& sett)
 		settings_pack::proxy_peer_connections);
 	p.proxy_tracker_connections = sett.get_bool(
 		settings_pack::proxy_tracker_connections);
+	p.require_authentication = sett.get_bool(settings_pack::proxy_require_authentication);
 }
 
 }

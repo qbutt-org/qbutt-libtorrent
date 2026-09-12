@@ -208,6 +208,12 @@ private:
 	{
 		COMPLETE_ASYNC("socks5_stream::connected");
 		if (handle_error(e, std::move(h))) return;
+		if ((m_version == 5 && (m_user.size() > 255 || m_password.size() > 255))
+			|| (m_require_authentication && (m_user.empty() || m_password.empty())))
+		{
+			std::move(h)(error_code(socks_error::authentication_error));
+			return;
+		}
 
 		using namespace libtorrent::aux;
 		if (m_version == 5)
@@ -280,7 +286,7 @@ private:
 			return;
 		}
 
-		if (version < m_version)
+		if (version < m_version || (m_require_authentication && version != 5))
 		{
 			std::move(h)(error_code(socks_error::unsupported_version));
 			return;
