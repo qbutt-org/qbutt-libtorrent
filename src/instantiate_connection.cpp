@@ -129,6 +129,7 @@ namespace libtorrent { namespace aux {
 				ssl_stream<socks5_stream> s(ios, *static_cast<ssl::context*>(ssl_context));
 				socks5_stream* str = &s.next_layer();
 				str->set_proxy(ps.hostname, ps.port);
+				str->require_authentication(ps.require_authentication);
 				if (ps.type == settings_pack::socks5_pw)
 					str->set_username(ps.username, ps.password);
 				if (ps.type == settings_pack::socks4)
@@ -140,6 +141,7 @@ namespace libtorrent { namespace aux {
 			{
 				socks5_stream s(ios);
 				s.set_proxy(ps.hostname, ps.port);
+				s.require_authentication(ps.require_authentication);
 				if (ps.type == settings_pack::socks5_pw)
 					s.set_username(ps.username, ps.password);
 				if (ps.type == settings_pack::socks4)

@@ -180,6 +180,10 @@ namespace aux {
 		tcp::endpoint endp;
 		torrent_peer* peerinfo;
 		peer_id our_peer_id;
+		peer_route_context route;
+		peer_route::type_t route_type = peer_route::type_t::session_default;
+		tcp::endpoint route_local_endpoint;
+		std::uint32_t native_interface_index = 0;
 	};
 
 	struct TORRENT_EXTRA_EXPORT peer_connection_hot_members
@@ -490,6 +494,8 @@ namespace aux {
 		aux::socket_type const& get_socket() const { return m_socket; }
 		aux::socket_type& get_socket() { return m_socket; }
 		tcp::endpoint const& remote() const override { return m_remote; }
+		peer_route_context route_context() const { return m_route; }
+		bool has_peer_route() const { return m_route_type != peer_route::type_t::session_default; }
 		tcp::endpoint local_endpoint() const override { return m_local; }
 
 #if TORRENT_USE_I2P
@@ -862,6 +868,12 @@ namespace aux {
 		// it may not necessarily be the peer we're
 		// connected to, in case we use a proxy
 		tcp::endpoint m_remote;
+		peer_route_context const m_route;
+		peer_route::type_t const m_route_type;
+		tcp::endpoint const m_route_local_endpoint;
+		std::uint32_t const m_native_interface_index;
+		std::int64_t m_previous_download = 0;
+		std::int64_t m_previous_upload = 0;
 
 	public:
 		aux::chained_buffer m_send_buffer;

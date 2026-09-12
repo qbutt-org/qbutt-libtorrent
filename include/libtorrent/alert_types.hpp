@@ -99,7 +99,7 @@ namespace libtorrent {
 	constexpr int user_alert_id = 10000;
 
 	// this constant represents "max_alert_index" + 1
-	constexpr int num_alert_types = 105;
+	constexpr int num_alert_types = 106;
 
 	// internal
 	constexpr int abi_alert_count = 128;
@@ -3110,6 +3110,26 @@ TORRENT_VERSION_NAMESPACE_3_END
 
 		// list of trackers and their status for the torrent
 		std::vector<announce_entry> trackers;
+	};
+
+	// Final accounting for a selected connection, including rejected attempts,
+	// normal closure, transport failure and protocol errors. The original peer
+	// endpoint and torrent handle retain their upstream meaning. No credentials
+	// or local proxy endpoints are exposed. Totals are payload, not verified data.
+	struct TORRENT_EXPORT peer_route_alert final : peer_alert
+	{
+		TORRENT_UNEXPORT peer_route_alert(aux::stack_allocator& alloc, torrent_handle h
+			, tcp::endpoint const& ep, peer_id const& pid, peer_route_context context
+			, operation_t operation, error_code const& ec, std::int64_t downloaded
+			, std::int64_t uploaded);
+		TORRENT_DEFINE_ALERT_PRIO(peer_route_alert, 105, alert_priority::high)
+		static constexpr alert_category_t static_category = alert_category::connect;
+		std::string message() const override;
+		peer_route_context const route;
+		operation_t const op;
+		error_code const error;
+		std::int64_t const route_payload_download;
+		std::int64_t const route_payload_upload;
 	};
 
 	// internal

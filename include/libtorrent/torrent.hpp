@@ -662,7 +662,8 @@ namespace libtorrent {
 #endif
 
 		void connect_to_url_seed(std::list<web_seed_t>::iterator);
-		bool connect_to_peer(torrent_peer*, bool ignore_limit = false);
+		enum class peer_connect_result { connected, rejected, failed };
+		peer_connect_result connect_to_peer(torrent_peer*, bool ignore_limit = false);
 
 		int priority() const;
 #if TORRENT_ABI_VERSION == 1

@@ -3025,7 +3025,7 @@ namespace {
 		"block_uploaded", "alerts_dropped", "socks5",
 		"file_prio", "oversized_file", "torrent_conflict",
 		"peer_info", "file_progress", "piece_info",
-		"piece_availability", "tracker_list"
+		"piece_availability", "tracker_list", "peer_route"
 		}};
 
 		TORRENT_ASSERT(alert_type >= 0);
@@ -3288,6 +3288,24 @@ namespace {
 	constexpr alert_category_t piece_info_alert::static_category;
 	constexpr alert_category_t piece_availability_alert::static_category;
 	constexpr alert_category_t tracker_list_alert::static_category;
+	constexpr alert_category_t peer_route_alert::static_category;
+
+	peer_route_alert::peer_route_alert(aux::stack_allocator& alloc, torrent_handle h
+		, tcp::endpoint const& ep, peer_id const& pid, peer_route_context context
+		, operation_t operation, error_code const& ec, std::int64_t downloaded
+		, std::int64_t uploaded)
+		: peer_alert(alloc, h, ep, pid)
+		, route(context)
+		, op(operation)
+		, error(ec)
+		, route_payload_download(downloaded)
+		, route_payload_upload(uploaded)
+	{}
+
+	std::string peer_route_alert::message() const
+	{
+		return peer_alert::message() + " route closed: " + error.message();
+	}
 #if TORRENT_ABI_VERSION == 1
 	constexpr alert_category_t anonymous_mode_alert::static_category;
 	constexpr alert_category_t mmap_cache_alert::static_category;

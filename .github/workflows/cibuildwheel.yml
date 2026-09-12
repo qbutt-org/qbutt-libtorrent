@@ -25,12 +25,6 @@ on:
       publish_test:
         description: Write 'PUBLISH_TEST' to publish to test-pypi. BEWARE! ARTIFACTS ARE IMMUTABLE AND CANNOT BE REPLACED ONCE PUBLISHED!
 
-  pull_request:
-    paths:
-      - .github/workflows/cibuildwheel.yml
-      - tools/cibuildwheel/**
-      - pyproject.toml
-
 concurrency:
    group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
    cancel-in-progress: true

@@ -727,6 +727,9 @@ namespace aux {
 			void insert_peer(std::shared_ptr<peer_connection> const& c) override;
 
 			proxy_settings proxy() const override;
+			peer_route select_peer_route(peer_route_request const&) const override;
+			void set_peer_route_selector(peer_route_selector selector);
+			void invalidate_peer_route(peer_route_context context);
 
 #ifndef TORRENT_DISABLE_DHT
 			bool is_dht_running() const { return (m_dht.get() != nullptr); }
@@ -993,6 +996,7 @@ namespace aux {
 			// object. It is the complete list of all connected
 			// peers.
 			connection_map m_connections;
+			peer_route_selector m_peer_route_selector;
 
 #ifdef TORRENT_SSL_PEERS
 			// this list holds incoming connections while they

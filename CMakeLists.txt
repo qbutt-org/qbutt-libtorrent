@@ -90,6 +90,7 @@ set(libtorrent_include_files
 	peer_connection_interface.hpp
 	peer_id.hpp
 	peer_info.hpp
+	peer_route.hpp
 	peer_list.hpp
 	peer_request.hpp
 	performance_counters.hpp

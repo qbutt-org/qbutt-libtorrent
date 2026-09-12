@@ -3750,9 +3750,10 @@ namespace {
 			}
 #endif
 
-			if (!connect_to_peer(p))
+			auto const result = connect_to_peer(p);
+			if (result != peer_connect_result::connected)
 			{
-				m_peer_list->inc_failcount(p);
+				if (result == peer_connect_result::failed) m_peer_list->inc_failcount(p);
 				update_want_peers();
 			}
 			else
@@ -7440,7 +7441,7 @@ namespace {
 	};
 #endif
 
-	bool torrent::connect_to_peer(torrent_peer* peerinfo, bool const ignore_limit)
+	torrent::peer_connect_result torrent::connect_to_peer(torrent_peer* peerinfo, bool const ignore_limit)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		INVARIANT_CHECK;
@@ -7449,7 +7450,7 @@ namespace {
 		TORRENT_ASSERT(peerinfo);
 		TORRENT_ASSERT(peerinfo->connection == nullptr);
 
-		if (m_abort) return false;
+		if (m_abort) return peer_connect_result::failed;
 
 		peerinfo->last_connected = m_ses.session_time();
 #if TORRENT_USE_ASSERTS
@@ -7479,6 +7480,61 @@ namespace {
 			|| !m_ip_filter
 			|| (m_ip_filter->access(peerinfo->address()) & ip_filter::blocked) == 0);
 
+		peer_route route;
+#if TORRENT_USE_I2P
+		if (!peerinfo->is_i2p_addr)
+#endif
+			route = m_ses.select_peer_route({info_hash(), a, m_torrent_file->priv()
+				, static_cast<std::uint8_t>(peerinfo->peer_source())});
+
+		bool const local_proxy = route.type == peer_route::type_t::socks5;
+		bool const explicit_bind = !route.local_endpoint.address().is_unspecified();
+		error_code route_error;
+		if (route.type == peer_route::type_t::blocked)
+			route_error = boost::asio::error::access_denied;
+		else if (local_proxy && (!route.proxy_endpoint.address().is_loopback()
+			|| route.proxy_endpoint.port() == 0 || route.context.path_id == 0
+			|| route.context.generation == 0 || route.username.empty() || route.password.empty()
+			|| route.username.size() > 255 || route.password.size() > 255))
+			route_error = boost::asio::error::invalid_argument;
+		else if (local_proxy && !settings().get_bool(settings_pack::enable_outgoing_tcp))
+			route_error = boost::asio::error::operation_not_supported;
+		else if (explicit_bind && (route.type != peer_route::type_t::native
+			|| route.local_endpoint.address().is_v4() != a.address().is_v4()))
+			route_error = boost::asio::error::invalid_argument;
+		else if (route.native_interface_index != 0 && !explicit_bind)
+			route_error = boost::asio::error::invalid_argument;
+		else if (explicit_bind && !settings().get_bool(settings_pack::enable_outgoing_tcp))
+			route_error = boost::asio::error::operation_not_supported;
+#ifndef TORRENT_WINDOWS
+		else if (route.native_interface_index != 0)
+			route_error = boost::asio::error::operation_not_supported;
+#endif
+		else if (route.type != peer_route::type_t::session_default
+			&& route.type != peer_route::type_t::native && !local_proxy)
+			route_error = boost::asio::error::invalid_argument;
+
+		if (route_error)
+		{
+			if (alerts().should_post<peer_route_alert>())
+				alerts().emplace_alert<peer_route_alert>(get_handle(), a, peer_id{}
+					, route.context, operation_t::connect, route_error, 0, 0);
+			return peer_connect_result::rejected;
+		}
+
+		aux::proxy_settings proxy;
+		if (route.type == peer_route::type_t::session_default)
+			proxy = m_ses.proxy();
+		else if (local_proxy)
+		{
+			proxy.type = settings_pack::socks5_pw;
+			proxy.hostname = route.proxy_endpoint.address().to_string();
+			proxy.port = route.proxy_endpoint.port();
+			proxy.username = std::move(route.username);
+			proxy.password = std::move(route.password);
+			proxy.require_authentication = true;
+		}
+
 		// this is where we determine if we open a regular TCP connection
 		// or a uTP connection. If the utp_socket_manager pointer is not passed in
 		// we'll instantiate a TCP connection
@@ -7493,13 +7549,13 @@ namespace {
 				// SAM proxy.
 				if (alerts().should_post<i2p_alert>())
 					alerts().emplace_alert<i2p_alert>(errors::no_i2p_router);
-				return false;
+				return peer_connect_result::failed;
 			}
 		}
 		else
 #endif
 		{
-			if (settings().get_bool(settings_pack::enable_outgoing_utp)
+			if (!local_proxy && !explicit_bind && settings().get_bool(settings_pack::enable_outgoing_utp)
 				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
 					|| peerinfo->supports_utp
 					|| peerinfo->confirmed_supports_utp))
@@ -7518,7 +7574,7 @@ namespace {
 						, peerinfo->supports_utp);
 				}
 #endif
-				return false;
+				return peer_connect_result::failed;
 			}
 		}
 
@@ -7563,7 +7619,7 @@ namespace {
 #endif
 
 			aux::socket_type ret = instantiate_connection(m_ses.get_context()
-				, m_ses.proxy(), userdata, sm, true, false);
+				, proxy, userdata, sm, true, false);
 
 #if defined TORRENT_SSL_PEERS
 			if (is_ssl_torrent())
@@ -7591,6 +7647,10 @@ namespace {
 			, a
 			, peerinfo
 			, our_pid
+			, route.context
+			, route.type
+			, route.local_endpoint
+			, route.native_interface_index
 		};
 
 		auto c = std::make_shared<bt_peer_connection>(pack);
@@ -7637,13 +7697,13 @@ namespace {
 			update_want_tick();
 			c->start();
 
-			if (c->is_disconnecting()) return false;
+			if (c->is_disconnecting()) return peer_connect_result::failed;
 		}
 		catch (std::exception const&)
 		{
 			TORRENT_ASSERT(m_iterating_connections == 0);
 			c->disconnect(errors::no_error, operation_t::bittorrent, peer_connection_interface::failure);
-			return false;
+			return peer_connect_result::failed;
 		}
 
 #ifndef TORRENT_DISABLE_SHARE_MODE
@@ -7651,7 +7711,7 @@ namespace {
 			recalc_share_mode();
 #endif
 
-		return peerinfo->connection != nullptr;
+		return peerinfo->connection != nullptr ? peer_connect_result::connected : peer_connect_result::failed;
 	}
 
 	error_code torrent::initialize_merkle_trees()
@@ -11163,10 +11223,11 @@ namespace {
 			return false;
 		}
 
-		if (!connect_to_peer(p))
+		peer_connect_result const result = connect_to_peer(p);
+		if (result != peer_connect_result::connected)
 		{
 			m_stats_counters.inc_stats_counter(counters::missed_connection_attempts);
-			m_peer_list->inc_failcount(p);
+			if (result == peer_connect_result::failed) m_peer_list->inc_failcount(p);
 			update_want_peers();
 			return false;
 		}

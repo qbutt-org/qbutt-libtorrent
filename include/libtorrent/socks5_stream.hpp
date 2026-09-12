@@ -111,6 +111,7 @@ public:
 	{}
 
 	void set_version(int v) { m_version = v; }
+	void require_authentication(bool value) { m_require_authentication = value; }
 
 	void set_command(int c)
 	{
@@ -212,10 +213,15 @@ private:
 		if (m_version == 5)
 		{
 			// send SOCKS5 authentication methods
-			m_buffer.resize(m_user.empty()?3:4);
+			m_buffer.resize(m_user.empty() || m_require_authentication ? 3 : 4);
 			char* p = &m_buffer[0];
 			write_uint8(5, p); // SOCKS VERSION 5
-			if (m_user.empty())
+			if (m_require_authentication)
+			{
+				write_uint8(1, p);
+				write_uint8(2, p); // username/password only
+			}
+			else if (m_user.empty())
 			{
 				write_uint8(1, p); // 1 authentication method (no auth)
 				write_uint8(0, p); // no authentication
@@ -267,6 +273,12 @@ private:
 		char* p = &m_buffer[0];
 		int version = read_uint8(p);
 		int method = read_uint8(p);
+
+		if (m_require_authentication && method != 2)
+		{
+			std::move(h)(error_code(socks_error::unsupported_authentication_method));
+			return;
+		}
 
 		if (version < m_version)
 		{
@@ -549,6 +561,7 @@ private:
 	std::string m_user;
 	std::string m_password;
 	std::string m_dst_name;
+	bool m_require_authentication = false;
 
 	int m_version;
 

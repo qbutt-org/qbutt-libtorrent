@@ -39,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/socket.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/peer_id.hpp"
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/config.hpp"
 #include "libtorrent/bitfield.hpp"
 #include "libtorrent/time.hpp"
@@ -95,6 +96,13 @@ TORRENT_VERSION_NAMESPACE_2
 		// payload data.
 		std::int64_t total_download;
 		std::int64_t total_upload;
+
+		// Immutable connection route and payload on this connection alone. Unlike
+		// total_download/total_upload these exclude previous connections' bytes.
+		// Payload may be redundant or fail hashes; it is not verified goodput.
+		peer_route_context route;
+		std::int64_t route_payload_download = 0;
+		std::int64_t route_payload_upload = 0;
 
 		// the time since we last sent a request to this peer and since any
 		// transfer occurred with this peer

@@ -86,6 +86,9 @@ namespace aux {
 
 		// if true, tracker connections are subject to the proxy settings
 		bool proxy_tracker_connections = true;
+
+		// Opt-in strict RFC 1929 authentication for private local payload relays.
+		bool require_authentication = false;
 	};
 
 }}

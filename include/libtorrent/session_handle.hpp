@@ -47,6 +47,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_class.hpp"
 #include "libtorrent/peer_class_type_filter.hpp"
 #include "libtorrent/peer_id.hpp"
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/io_context.hpp"
 #include "libtorrent/session_types.hpp"
 #include "libtorrent/portmap.hpp" // for portmap_protocol
@@ -102,6 +103,17 @@ namespace libtorrent {
 		// session has been destroyed, all session_handle objects will expire and
 		// not be valid.
 		bool is_valid() const { return !m_impl.expired(); }
+
+		// Select outgoing BitTorrent TCP routes without changing peer identity,
+		// torrent ownership, the picker or session limits. An empty selector keeps
+		// upstream routing. Native inherits outgoing_interfaces; SOCKS5's local
+		// transport is bound by the loopback OS route and its relay owns egress.
+		// Trackers, web seeds, discovery and UDP are outside this API.
+		// These calls are synchronous barriers on the network thread. Replace the
+		// selector/catalog before invalidating a retired generation, so it cannot
+		// be selected again. Invalidation closes connecting and connected peers.
+		void set_peer_route_selector(peer_route_selector selector);
+		void invalidate_peer_route(peer_route_context context);
 
 		// saves settings (i.e. the settings_pack)
 		static constexpr save_state_flags_t save_settings = 0_bit;

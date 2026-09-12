@@ -966,6 +966,52 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		return proxy_settings(m_settings);
 	}
 
+	peer_route session_impl::select_peer_route(peer_route_request const& request) const
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (!m_peer_route_selector) return {};
+#ifndef BOOST_NO_EXCEPTIONS
+		try
+		{
+#endif
+			return m_peer_route_selector(request);
+#ifndef BOOST_NO_EXCEPTIONS
+		}
+		catch (...)
+		{
+			// Callback exception strings may contain private route credentials.
+			peer_route rejected;
+			rejected.type = peer_route::type_t::blocked;
+			return rejected;
+		}
+#endif
+	}
+
+	void session_impl::set_peer_route_selector(peer_route_selector selector)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		m_peer_route_selector = std::move(selector);
+	}
+
+	void session_impl::invalidate_peer_route(peer_route_context const context)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		for (auto i = m_connections.begin(); i != m_connections.end();)
+		{
+			auto const connection = *i++;
+			auto const route = connection->route_context();
+			if (connection->has_peer_route() && route.path_id == context.path_id
+				&& route.generation == context.generation)
+			{
+				connection->disconnect(boost::asio::error::operation_aborted
+					, operation_t::connect, peer_connection_interface::normal);
+				// Policy revocation must not wait for a graceful TLS shutdown.
+				error_code ec;
+				connection->get_socket().close(ec);
+			}
+		}
+	}
+
 #ifndef TORRENT_DISABLE_EXTENSIONS
 
 	void session_impl::add_extension(ext_function_t ext)

@@ -87,6 +87,16 @@ namespace libtorrent {
 
 	constexpr reopen_network_flags_t session_handle::reopen_map_ports;
 
+	void session_handle::set_peer_route_selector(peer_route_selector selector)
+	{
+		sync_call(&session_impl::set_peer_route_selector, std::move(selector));
+	}
+
+	void session_handle::invalidate_peer_route(peer_route_context context)
+	{
+		sync_call(&session_impl::invalidate_peer_route, context);
+	}
+
 	template <typename Fun, typename... Args>
 	void session_handle::async_call(Fun f, Args&&... a) const
 	{
