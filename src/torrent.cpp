@@ -7748,7 +7748,13 @@ namespace {
 				, static_cast<std::uint8_t>(peerinfo->peer_source()), valid_metadata()});
 
 		bool const local_proxy = route.type == peer_route::type_t::socks5;
-		bool const route_utp = route.transport == peer_route::transport_t::utp;
+		bool const route_utp = route.transport == peer_route::transport_t::utp
+			|| (route.transport == peer_route::transport_t::automatic
+				&& route.context.path_id != 0
+				&& settings().get_bool(settings_pack::enable_outgoing_utp)
+				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
+					|| peerinfo->supports_utp || peerinfo->confirmed_supports_utp)
+				&& m_ses.has_udp_route(route.context, a.address(), is_ssl_torrent(), route.type));
 		bool const explicit_bind = !route_utp && !route.local_endpoint.address().is_unspecified();
 		error_code route_error;
 		if (managed_routes() && (!allows_route(route.context, a.address().is_v4()
@@ -7929,7 +7935,7 @@ namespace {
 			, route.type
 			, route_utp ? tcp::endpoint{} : route.local_endpoint
 			, route_utp ? 0 : route.native_interface_index
-			, route.transport
+			, route_utp ? peer_route::transport_t::utp : route.transport
 		};
 
 		auto c = std::make_shared<bt_peer_connection>(pack);

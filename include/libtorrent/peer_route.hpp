@@ -63,8 +63,8 @@ struct peer_route : route_descriptor
 {
 	enum class transport_t { automatic, tcp, utp };
 	// Explicit uTP uses a ready registered UDP context and never falls back
-	// to TCP. Automatic preserves existing session/Native behavior and uses
-	// TCP for selected SOCKS routes.
+	// to TCP. Automatic preserves the standard peer capability choice and uses
+	// a ready registered UDP context for managed Native or SOCKS routes.
 	transport_t transport = transport_t::automatic;
 };
 
