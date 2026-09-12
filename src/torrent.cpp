@@ -3024,13 +3024,34 @@ namespace {
 #else
 		TORRENT_UNUSED(url);
 #endif
+		bool const udp = url.compare(0, 6, "udp://") == 0;
+		if (tor.managed_routes() && !udp)
+		{
+			std::size_t valid_endpoints = 0;
+			for (auto const& route : tor.route_policy().routes)
+			{
+				if (!tor.allows_route(route.binding.context, route.family)) continue;
+				auto const existing = std::find_if(aeps.begin() + int(valid_endpoints), aeps.end()
+					, [&](aux::announce_endpoint const& endpoint)
+					{ return endpoint.route && *endpoint.route == route; });
+				if (existing == aeps.end())
+				{
+					aeps.emplace_back(route, complete_sent);
+					std::iter_swap(aeps.begin() + int(valid_endpoints), aeps.end() - 1);
+				}
+				else std::iter_swap(aeps.begin() + int(valid_endpoints), existing);
+				valid_endpoints++;
+			}
+			aeps.erase(aeps.begin() + int(valid_endpoints), aeps.end());
+			return;
+		}
 
 		// update the endpoint list by adding entries for new listen sockets
 		// and removing entries for non-existent ones
 		std::size_t valid_endpoints = 0;
 		ses.for_each_listen_socket([&](aux::listen_socket_handle const& s) {
 			if (!tor.allows_discovery_socket(s)) return;
-			if (s.is_ssl() != is_ssl || !s.supports_tracker(url.compare(0, 6, "udp://") == 0))
+			if (s.is_ssl() != is_ssl || !s.supports_tracker(udp))
 				return;
 			for (auto& aep : aeps)
 			{
@@ -3047,6 +3068,24 @@ namespace {
 
 		TORRENT_ASSERT(valid_endpoints <= aeps.size());
 		aeps.erase(aeps.begin() + int(valid_endpoints), aeps.end());
+	}
+
+	aux::announce_endpoint* find_request_endpoint(aux::announce_entry& entry
+		, tracker_request const& request)
+	{
+		if (request.route_operation
+			&& request.route_operation->route.binding.context.path_id != 0)
+		{
+			auto const endpoint = std::find_if(entry.endpoints.begin(), entry.endpoints.end()
+				, [&](aux::announce_endpoint const& candidate)
+				{
+					return candidate.route
+						&& *candidate.route == request.route_operation->route;
+				});
+			return endpoint == entry.endpoints.end() ? nullptr : &*endpoint;
+		}
+
+		return entry.find_endpoint(request.outgoing_socket);
 	}
 }
 
@@ -3068,10 +3107,11 @@ namespace {
 
 		struct announce_state
 		{
-			explicit announce_state(aux::listen_socket_handle s)
-				: socket(std::move(s)) {}
+			explicit announce_state(aux::announce_endpoint const& endpoint)
+				: socket(endpoint.socket), route(endpoint.route) {}
 
 			aux::listen_socket_handle socket;
+			boost::optional<network_route> route;
 
 			aux::array<announce_protocol_state, num_protocols, protocol_version> state;
 		};
@@ -3272,10 +3312,10 @@ namespace {
 				// nor announce_to_all_tiers is set may be triggered prematurely
 
 				auto aep_state_iter = std::find_if(listen_socket_states.begin(), listen_socket_states.end()
-					, [&](announce_state const& s) { return s.socket == aep.socket; });
+					, [&](announce_state const& s) { return s.socket == aep.socket && s.route == aep.route; });
 				if (aep_state_iter == listen_socket_states.end())
 				{
-					listen_socket_states.emplace_back(aep.socket);
+					listen_socket_states.emplace_back(aep);
 					aep_state_iter = listen_socket_states.end() - 1;
 				}
 				announce_state& ep_state = *aep_state_iter;
@@ -3354,7 +3394,9 @@ namespace {
 					req.key = tracker_key();
 
 					req.outgoing_socket = aep.socket;
-					req.route_operation = route_operation(aep.socket, aux::network_operation::kind_t::tracker);
+					req.route_operation = aep.route
+						? route_operation(*aep.route, aux::network_operation::kind_t::tracker)
+						: route_operation(aep.socket, aux::network_operation::kind_t::tracker);
 					req.info_hash = m_torrent_file->info_hashes().get(ih);
 
 #ifndef TORRENT_DISABLE_LOGGING
@@ -3463,7 +3505,9 @@ namespace {
 		{
 			if (!aep.enabled) continue;
 			req.outgoing_socket = aep.socket;
-			req.route_operation = route_operation(aep.socket, aux::network_operation::kind_t::tracker);
+			req.route_operation = aep.route
+				? route_operation(*aep.route, aux::network_operation::kind_t::tracker)
+				: route_operation(aep.socket, aux::network_operation::kind_t::tracker);
 			m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version)
 			{
 				req.info_hash = ih;
@@ -3475,6 +3519,7 @@ namespace {
 	void torrent::tracker_warning(tracker_request const& req, std::string const& msg)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		if (req.route_operation && req.route_operation->aborted) return;
 
 		INVARIANT_CHECK;
 
@@ -3485,12 +3530,11 @@ namespace {
 		tcp::endpoint local_endpoint;
 		if (ae)
 		{
-			for (auto& aep : ae->endpoints)
+			auto* const aep = find_request_endpoint(*ae, req);
+			if (aep)
 			{
-				if (aep.socket != req.outgoing_socket) continue;
-				local_endpoint = aep.local_endpoint;
-				aep.info_hashes[hash_version].message = msg;
-				break;
+				local_endpoint = aep->local_endpoint;
+				aep->info_hashes[hash_version].message = msg;
 			}
 		}
 
@@ -3503,6 +3547,7 @@ namespace {
 		, int const complete, int const incomplete, int const downloaded, int /* downloaders */)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		if (req.route_operation && req.route_operation->aborted) return;
 
 		INVARIANT_CHECK;
 		TORRENT_ASSERT(req.kind & tracker_request::scrape_request);
@@ -3514,7 +3559,7 @@ namespace {
 		tcp::endpoint local_endpoint;
 		if (ae)
 		{
-			auto* aep = ae->find_endpoint(req.outgoing_socket);
+			auto* aep = find_request_endpoint(*ae, req);
 			if (aep)
 			{
 				local_endpoint = aep->local_endpoint;
@@ -3610,7 +3655,7 @@ namespace {
 		tcp::endpoint local_endpoint;
 		if (ae)
 		{
-			auto* aep = ae->find_endpoint(r.outgoing_socket);
+			auto* aep = find_request_endpoint(*ae, r);
 			if (aep)
 			{
 				auto& a = aep->info_hashes[v];
@@ -10163,10 +10208,11 @@ namespace {
 	{
 		struct timer_state
 		{
-			explicit timer_state(aux::listen_socket_handle s)
-				: socket(std::move(s)) {}
+			explicit timer_state(aux::announce_endpoint const& endpoint)
+				: socket(endpoint.socket), route(endpoint.route) {}
 
 			aux::listen_socket_handle socket;
+			boost::optional<network_route> route;
 
 			struct state_t
 			{
@@ -10225,10 +10271,10 @@ namespace {
 			for (auto const& aep : t.endpoints)
 			{
 				auto aep_state_iter = std::find_if(listen_socket_states.begin(), listen_socket_states.end()
-					, [&](timer_state const& s) { return s.socket == aep.socket; });
+					, [&](timer_state const& s) { return s.socket == aep.socket && s.route == aep.route; });
 				if (aep_state_iter == listen_socket_states.end())
 				{
-					listen_socket_states.emplace_back(aep.socket);
+					listen_socket_states.emplace_back(aep);
 					aep_state_iter = listen_socket_states.end() - 1;
 				}
 				timer_state& ep_state = *aep_state_iter;
@@ -12514,10 +12560,9 @@ namespace {
 			protocol_version hash_version = protocol_version::V1;
 			if (ae)
 			{
-				auto aep = std::find_if(ae->endpoints.begin(), ae->endpoints.end()
-					, [&](aux::announce_endpoint const& e) { return e.socket == r.outgoing_socket; });
+				auto* const aep = find_request_endpoint(*ae, r);
 
-				if (aep != ae->endpoints.end())
+				if (aep)
 				{
 					hash_version = r.info_hash == m_info_hash.v1
 						? protocol_version::V1 : protocol_version::V2;
@@ -12597,7 +12642,7 @@ namespace {
 				tcp::endpoint local_endpoint;
 				if (ae != nullptr)
 				{
-					auto* aep = ae->find_endpoint(r.outgoing_socket);
+					auto* aep = find_request_endpoint(*ae, r);
 					if (aep != nullptr) local_endpoint = aep->local_endpoint;
 				}
 

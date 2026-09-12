@@ -216,7 +216,9 @@ namespace libtorrent {
 
 		// i2p trackers don't use our outgoing sockets, they use the SAM
 		// connection
-		if (!i2p && !tracker_req().outgoing_socket)
+		if (!i2p && !tracker_req().outgoing_socket
+			&& (!tracker_req().route_operation
+				|| tracker_req().route_operation->route.binding.context.path_id == 0))
 		{
 			fail(errors::invalid_listen_socket, operation_t::get_interface
 				, "outgoing socket was closed");
@@ -277,7 +279,7 @@ namespace libtorrent {
 			else if (route.type == route_descriptor::type_t::native)
 			{
 				tracker_proxy = nullptr;
-				bi = bind_info_t{ls.device(), route.local_endpoint.address()
+				bi = bind_info_t{ls ? ls.device() : std::string{}, route.local_endpoint.address()
 					, route.native_interface_index};
 			}
 		}

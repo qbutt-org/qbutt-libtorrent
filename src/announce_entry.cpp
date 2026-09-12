@@ -202,6 +202,14 @@ namespace aux {
 		TORRENT_UNUSED(completed);
 	}
 
+	announce_endpoint::announce_endpoint(network_route r, bool const completed)
+		: local_endpoint(r.binding.local_endpoint)
+		, enabled(true)
+		, route(std::move(r))
+	{
+		TORRENT_UNUSED(completed);
+	}
+
 	announce_entry::announce_entry(string_view u)
 		: url(u.to_string())
 		, source(0)

@@ -44,6 +44,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/listen_socket_handle.hpp"
 #include "libtorrent/aux_/array.hpp"
 #include "libtorrent/info_hash.hpp"
+#include "libtorrent/torrent_route_policy.hpp"
+
+#include <boost/optional.hpp>
 
 #include <string>
 #include <cstdint>
@@ -137,6 +140,7 @@ namespace aux {
 	{
 		// internal
 		announce_endpoint(aux::listen_socket_handle const& s, bool completed);
+		announce_endpoint(network_route route, bool completed);
 
 		// the local endpoint of the listen interface associated with this endpoint
 		tcp::endpoint local_endpoint;
@@ -158,6 +162,7 @@ namespace aux {
 
 		// internal
 		aux::listen_socket_handle socket;
+		boost::optional<network_route> route;
 	};
 
 	// this class holds information about one bittorrent tracker, as it
