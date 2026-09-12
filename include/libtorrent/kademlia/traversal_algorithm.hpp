@@ -49,6 +49,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/flags.hpp>
 #include <libtorrent/bdecode.hpp>
 #include <libtorrent/aux_/invariant_check.hpp>
+#include <libtorrent/aux_/network_operation.hpp>
 
 namespace libtorrent {
 
@@ -89,6 +90,10 @@ struct TORRENT_EXTRA_EXPORT traversal_algorithm
 	node& get_node() const { return m_node; }
 
 	void abort() { m_abort = true; }
+	void set_route_operation(std::shared_ptr<aux::network_operation> operation)
+	{ m_route_operation = std::move(operation); }
+	bool route_operation_aborted() const
+	{ return m_route_operation && m_route_operation->aborted; }
 
 #ifndef TORRENT_DISABLE_LOGGING
 	std::uint32_t id() const { return m_id; }
@@ -121,6 +126,7 @@ protected:
 	int num_timeouts() const { return m_timeouts; }
 
 	node& m_node;
+	std::shared_ptr<aux::network_operation> m_route_operation;
 
 	// this vector is sorted by node-id distance from our node id. Closer nodes
 	// are earlier in the vector. However, not the entire vector is necessarily

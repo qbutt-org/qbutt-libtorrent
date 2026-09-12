@@ -91,6 +91,7 @@ set(libtorrent_include_files
 	peer_id.hpp
 	peer_info.hpp
 	peer_route.hpp
+	torrent_route_policy.hpp
 	udp_route.hpp
 	peer_list.hpp
 	peer_request.hpp
@@ -256,6 +257,7 @@ set(libtorrent_aux_include_files
 	receive_buffer.hpp
 	resolver.hpp
 	resolver_interface.hpp
+	network_operation.hpp
 	scope_end.hpp
 	session_call.hpp
 	session_impl.hpp

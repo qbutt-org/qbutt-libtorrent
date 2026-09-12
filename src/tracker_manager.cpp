@@ -276,6 +276,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		TORRENT_ASSERT(req.num_want >= 0);
 		TORRENT_ASSERT(!m_abort || req.event == event_t::stopped);
 		if (m_abort && req.event != event_t::stopped) return;
+		if (req.route_operation && req.route_operation->aborted) return;
 
 #ifndef TORRENT_DISABLE_LOGGING
 		std::shared_ptr<request_callback> cb = c.lock();
@@ -485,6 +486,25 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 
 		for (auto const& c : close_udp_connections)
 			c->close();
+	}
+
+	void tracker_manager::abort_route_operations()
+	{
+		TORRENT_ASSERT(is_single_thread());
+		std::vector<std::shared_ptr<http_tracker_connection>> http;
+		std::vector<std::shared_ptr<udp_tracker_connection>> udp;
+		for (auto const& c : m_queued)
+			if (c->tracker_req().route_operation && c->tracker_req().route_operation->aborted)
+				http.push_back(c);
+		for (auto const& c : m_http_conns)
+			if (c->tracker_req().route_operation && c->tracker_req().route_operation->aborted)
+				http.push_back(c);
+		for (auto const& c : m_udp_conns)
+			if (c.second->tracker_req().route_operation
+				&& c.second->tracker_req().route_operation->aborted)
+				udp.push_back(c.second);
+		for (auto const& c : http) c->close();
+		for (auto const& c : udp) c->close();
 	}
 
 	void tracker_manager::abort_requests(aux::listen_socket_handle const& socket)

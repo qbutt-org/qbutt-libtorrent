@@ -27,7 +27,9 @@ struct peer_route_context
 	bool operator!=(peer_route_context const& rhs) const { return !(*this == rhs); }
 };
 
-struct peer_route
+enum class route_family { ipv4, ipv6 };
+
+struct route_descriptor
 {
 	enum class type_t { session_default, native, socks5, blocked };
 	type_t type = type_t::session_default;
@@ -47,6 +49,18 @@ struct peer_route
 	tcp::endpoint local_endpoint;
 	std::uint32_t native_interface_index = 0;
 
+	bool operator==(route_descriptor const& rhs) const
+	{
+		return type == rhs.type && context == rhs.context
+			&& proxy_endpoint == rhs.proxy_endpoint && username == rhs.username
+			&& password == rhs.password && local_endpoint == rhs.local_endpoint
+			&& native_interface_index == rhs.native_interface_index;
+	}
+	bool operator!=(route_descriptor const& rhs) const { return !(*this == rhs); }
+};
+
+struct peer_route : route_descriptor
+{
 	enum class transport_t { automatic, tcp, utp };
 	// Explicit uTP uses a ready registered UDP context and never falls back
 	// to TCP. Automatic preserves existing session/Native behavior and uses

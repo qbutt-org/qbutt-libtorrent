@@ -75,9 +75,11 @@ struct bind_info_t
 {
 	std::string device;
 	address ip;
+	std::uint32_t native_interface_index = 0;
 	bool operator==(bind_info_t const& rhs) const
 	{
-		return device == rhs.device && ip == rhs.ip;
+		return device == rhs.device && ip == rhs.ip
+			&& native_interface_index == rhs.native_interface_index;
 	}
 };
 

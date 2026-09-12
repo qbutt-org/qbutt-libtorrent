@@ -537,9 +537,111 @@ bool is_downloading_state(int const st)
 		set_need_save_resume(torrent_handle::if_download_progress);
 	}
 
+	bool torrent::managed_routes() const
+	{
+		return m_route_policy.mode == torrent_route_policy::mode_t::managed;
+	}
+
+	bool torrent::allows_route(peer_route_context const context, route_family const family) const
+	{
+		if (!managed_routes()) return context == peer_route_context{};
+		if ((!valid_metadata() || torrent_file().priv()) && context != m_route_policy.pinned)
+			return false;
+		return std::any_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+			, [&](network_route const& r) { return r.binding.context == context && r.family == family; });
+	}
+
+	bool torrent::allows_discovery_socket(aux::listen_socket_handle const& socket) const
+	{
+		if (!socket) return false;
+		return allows_route(socket.route_context(), socket.get_local_endpoint().address().is_v4()
+			? route_family::ipv4 : route_family::ipv6);
+	}
+
+	bool torrent::allows_peer_source(peer_source_flags_t const source) const
+	{
+		if (!managed_routes()) return true;
+		// Explicitly supplied peers (source zero) and this torrent's trackers are
+		// allowed. Resume/discovery candidates do not prove private tracker scope.
+		if (torrent_file().priv()) return !source || bool(source & peer_info::tracker);
+		// LSD belongs to session interfaces, not the selected outgoing path.
+		return !(source & peer_info::lsd);
+	}
+
+	std::shared_ptr<aux::network_operation> torrent::route_operation(
+		aux::listen_socket_handle const& socket, aux::network_operation::kind_t const kind)
+	{
+		network_route route;
+		route.family = !socket || socket.get_local_endpoint().address().is_v4()
+			? route_family::ipv4 : route_family::ipv6;
+		route.binding.context = socket.route_context();
+		for (auto const& r : m_route_policy.routes)
+			if (r.binding.context == socket.route_context() && r.family == route.family)
+				route = r;
+		return route_operation(std::move(route), kind);
+	}
+
+	std::shared_ptr<aux::network_operation> torrent::route_operation(
+		network_route route, aux::network_operation::kind_t const kind)
+	{
+		auto operation = std::make_shared<aux::network_operation>();
+		operation->kind = kind;
+		operation->route = std::move(route);
+		m_route_operations.erase(std::remove_if(m_route_operations.begin(), m_route_operations.end()
+			, [](auto const& p) { return p.expired(); }), m_route_operations.end());
+		m_route_operations.push_back(operation);
+		return operation;
+	}
+
+	void torrent::invalidate_route(peer_route_context const context)
+	{
+		for (auto const& weak : m_route_operations)
+			if (auto operation = weak.lock())
+				if (operation->route.binding.context == context) operation->aborted = true;
+	}
+
+	bool torrent::apply_route_policy(torrent_route_policy policy)
+	{
+		if (m_route_policy == policy) return false;
+		m_route_policy = std::move(policy);
+		for (auto const& weak : m_route_operations)
+			if (auto operation = weak.lock())
+				if (!allows_route(operation->route.binding.context, operation->route.family)
+					|| (managed_routes() && torrent_file().priv()
+						&& operation->kind == aux::network_operation::kind_t::dht))
+					operation->aborted = true;
+		for (auto i = m_connections.begin(); i != m_connections.end();)
+		{
+			auto const p = *i++;
+			auto const peer = p->peer_info_struct();
+			if (allows_route(p->route_context(), p->remote().address().is_v4()
+				? route_family::ipv4 : route_family::ipv6)
+				&& (!peer || allows_peer_source(peer->peer_source()))) continue;
+			p->disconnect(boost::asio::error::operation_aborted
+				, operation_t::connect, peer_connection_interface::normal);
+			error_code ec;
+			p->get_socket().close(ec);
+		}
+		if (m_peer_list && managed_routes())
+		{
+			std::vector<torrent_peer*> rejected;
+			for (auto const p : *m_peer_list)
+				if (!p->connection && !allows_peer_source(p->peer_source())) rejected.push_back(p);
+			auto state = get_peer_list_state();
+			for (auto const p : rejected) m_peer_list->erase_peer(p, &state);
+			peers_erased(state.erased);
+		}
+		for (auto& web : m_web_seeds)
+			if (web.route_operation && web.route_operation->aborted)
+				web.endpoints.clear();
+		return true;
+	}
+
 	void torrent::start()
 	{
 		TORRENT_ASSERT(is_single_thread());
+		apply_route_policy(m_ses.select_torrent_route_policy(
+			{info_hash(), torrent_file().priv(), valid_metadata()}));
 		TORRENT_ASSERT(m_was_started == false);
 #if TORRENT_USE_ASSERTS
 		m_was_started = true;
@@ -893,7 +995,7 @@ bool is_downloading_state(int const st)
 			ret |= torrent_flags::disable_dht;
 		if (!m_enable_lsd)
 			ret |= torrent_flags::disable_lsd;
-		if (!m_enable_pex)
+		if (!m_enable_pex || (managed_routes() && torrent_file().priv()))
 			ret |= torrent_flags::disable_pex;
 		if (m_i2p)
 			ret |= torrent_flags::i2p_torrent;
@@ -2701,6 +2803,7 @@ bool is_downloading_state(int const st)
 
 	void torrent::lsd_announce()
 	{
+		if (managed_routes()) return;
 		if (m_abort) return;
 		if (!m_enable_lsd) return;
 
@@ -2825,8 +2928,16 @@ bool is_downloading_state(int const st)
 		std::weak_ptr<torrent> self(shared_from_this());
 		m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version v)
 		{
-			m_ses.dht()->announce(ih, announce_port, flags
-				, std::bind(&torrent::on_dht_announce_response_disp, self, v, _1));
+			m_ses.for_each_listen_socket([&](aux::listen_socket_handle const& socket)
+			{
+				if (!allows_discovery_socket(socket)) return;
+				auto operation = route_operation(socket, aux::network_operation::kind_t::dht);
+				m_ses.dht()->announce(socket, ih, announce_port, flags
+					, [self, v, operation](std::vector<tcp::endpoint> const& peers)
+					{
+						if (!operation->aborted) on_dht_announce_response_disp(self, v, peers);
+					}, operation);
+			});
 		});
 	}
 
@@ -2891,7 +3002,7 @@ bool is_downloading_state(int const st)
 #endif
 
 namespace {
-	void refresh_endpoint_list(aux::session_interface& ses
+	void refresh_endpoint_list(aux::session_interface& ses, torrent const& tor
 		, std::string const& url
 		, bool const is_ssl, bool const complete_sent
 		, std::vector<aux::announce_endpoint>& aeps)
@@ -2899,6 +3010,7 @@ namespace {
 #if TORRENT_USE_I2P
 		if (is_i2p_url(url))
 		{
+			if (tor.managed_routes()) { aeps.clear(); return; }
 			if (aeps.size() > 1)
 			{
 				aeps.erase(aeps.begin() + 1, aeps.end());
@@ -2917,6 +3029,7 @@ namespace {
 		// and removing entries for non-existent ones
 		std::size_t valid_endpoints = 0;
 		ses.for_each_listen_socket([&](aux::listen_socket_handle const& s) {
+			if (!tor.allows_discovery_socket(s)) return;
 			if (s.is_ssl() != is_ssl || !s.supports_tracker(url.compare(0, 6, "udp://") == 0))
 				return;
 			for (auto& aep : aeps)
@@ -3131,7 +3244,7 @@ namespace {
 #ifndef TORRENT_DISABLE_LOGGING
 			++idx;
 #endif
-			refresh_endpoint_list(m_ses, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
+			refresh_endpoint_list(m_ses, *this, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
 
 			// if trackerid is not specified for tracker use default one, probably set explicitly
 			req.trackerid = ae.trackerid.empty() ? m_trackerid : ae.trackerid;
@@ -3241,6 +3354,7 @@ namespace {
 					req.key = tracker_key();
 
 					req.outgoing_socket = aep.socket;
+					req.route_operation = route_operation(aep.socket, aux::network_operation::kind_t::tracker);
 					req.info_hash = m_torrent_file->info_hashes().get(ih);
 
 #ifndef TORRENT_DISABLE_LOGGING
@@ -3337,7 +3451,7 @@ namespace {
 		else if (is_i2p() && !settings().get_bool(settings_pack::allow_i2p_mixed))
 			return;
 #endif
-		refresh_endpoint_list(m_ses, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
+		refresh_endpoint_list(m_ses, *this, ae.url, is_ssl_torrent(), bool(m_complete_sent), ae.endpoints);
 		req.url = ae.url;
 		req.private_torrent = m_torrent_file->priv();
 #if TORRENT_ABI_VERSION == 1
@@ -3349,6 +3463,7 @@ namespace {
 		{
 			if (!aep.enabled) continue;
 			req.outgoing_socket = aep.socket;
+			req.route_operation = route_operation(aep.socket, aux::network_operation::kind_t::tracker);
 			m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version)
 			{
 				req.info_hash = ih;
@@ -3470,6 +3585,7 @@ namespace {
 		, struct tracker_response const& resp)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		if (r.route_operation && r.route_operation->aborted) return;
 
 		INVARIANT_CHECK;
 		TORRENT_ASSERT(!(r.kind & tracker_request::scrape_request));
@@ -3788,7 +3904,7 @@ namespace {
 			for (auto& e : m_trackers)
 			{
 				// make sure we check for new endpoints from the listen sockets
-				refresh_endpoint_list(m_ses, e.url, is_ssl_torrent(), bool(m_complete_sent), e.endpoints);
+				refresh_endpoint_list(m_ses, *this, e.url, is_ssl_torrent(), bool(m_complete_sent), e.endpoints);
 				for (auto& aep : e.endpoints)
 				{
 					for (auto& a : aep.info_hashes)
@@ -6450,6 +6566,54 @@ namespace {
 			return;
 		}
 
+		if (managed_routes())
+		{
+			bool const pinned = !valid_metadata() || torrent_file().priv();
+			error_code addressError;
+			address const numeric = make_address(hostname, addressError);
+			auto const selected = std::find_if(m_route_policy.routes.begin(), m_route_policy.routes.end()
+				, [&](network_route const& route)
+				{
+					return (!pinned || route.binding.context == m_route_policy.pinned)
+						&& (addressError || (route.family == route_family::ipv4) == numeric.is_v4());
+				});
+			if (selected == m_route_policy.routes.end()) return;
+			if (!web->route_operation || web->route_operation->aborted
+				|| web->route_operation->route.binding != selected->binding
+				|| web->route_operation->route.family != selected->family)
+			{
+				web->endpoints.clear();
+				web->route_operation = route_operation(*selected
+					, aux::network_operation::kind_t::web_seed);
+			}
+			if (selected->binding.type == route_descriptor::type_t::socks5)
+			{
+				connect_web_seed(web, {address(), std::uint16_t(port)});
+				return;
+			}
+			if (!addressError)
+			{
+				connect_web_seed(web, {numeric, std::uint16_t(port)});
+				return;
+			}
+#ifndef TORRENT_DISABLE_LOGGING
+			debug_log("resolving Native web seed: \"%s\" %s", hostname.c_str(), web->url.c_str());
+#endif
+			web->resolving = true;
+			m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
+				, [self = shared_from_this(), web, port](error_code const& e
+					, std::vector<address> const& addrs)
+				{
+					self->wrap(&torrent::on_name_lookup, e, addrs, port, web);
+				});
+			return;
+		}
+		else if (!web->route_operation || web->route_operation->aborted)
+		{
+			web->route_operation = route_operation(network_route{}
+				, aux::network_operation::kind_t::web_seed);
+		}
+
 		if (!web->endpoints.empty())
 		{
 			connect_web_seed(web, web->endpoints.front());
@@ -6512,6 +6676,7 @@ namespace {
 			debug_log("proxy name lookup error: %s", e.message().c_str());
 #endif
 		web->resolving = false;
+		if (!web->route_operation || web->route_operation->aborted) return;
 
 		if (web->removed)
 		{
@@ -6595,6 +6760,7 @@ namespace {
 		debug_log("completed resolve: %s", web->url.c_str());
 #endif
 		web->resolving = false;
+		if (!web->route_operation || web->route_operation->aborted) return;
 		if (web->removed)
 		{
 #ifndef TORRENT_DISABLE_LOGGING
@@ -6626,6 +6792,9 @@ namespace {
 
 		for (auto const& addr : addrs)
 		{
+			if (managed_routes()
+				&& (web->route_operation->route.family == route_family::ipv4) != addr.is_v4())
+				continue;
 			// if this is set, we don't allow this web seed to have resolved to a
 			// local IP
 			if (web->no_local_ips && !aux::is_global(addr)) continue;
@@ -6667,6 +6836,7 @@ namespace {
 
 		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return;
+		if (!web->route_operation || web->route_operation->aborted) return;
 
 		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
 		{
@@ -6706,8 +6876,23 @@ namespace {
 			if (!userdata) userdata = m_ses.ssl_ctx();
 		}
 #endif
+		aux::proxy_settings connectionProxy = m_ses.proxy();
+		auto const& route = web->route_operation->route.binding;
+		if (route.type == route_descriptor::type_t::socks5)
+		{
+			connectionProxy = aux::proxy_settings{};
+			connectionProxy.type = settings_pack::socks5_pw;
+			connectionProxy.hostname = route.proxy_endpoint.address().to_string();
+			connectionProxy.port = route.proxy_endpoint.port();
+			connectionProxy.username = route.username;
+			connectionProxy.password = route.password;
+			connectionProxy.require_authentication = true;
+			connectionProxy.proxy_hostnames = true;
+		}
+		else if (route.type == route_descriptor::type_t::native)
+			connectionProxy = aux::proxy_settings{};
 		aux::socket_type s = instantiate_connection(m_ses.get_context()
-			, m_ses.proxy(), userdata, nullptr, true, false);
+			, connectionProxy, userdata, nullptr, true, false);
 
 		if (boost::get<http_stream>(&s))
 		{
@@ -6771,8 +6956,7 @@ namespace {
 
 		bool const is_ip = aux::is_ip_address(hostname);
 		if (is_ip) a.address(make_address(hostname, ec));
-		bool const proxy_hostnames = settings().get_bool(settings_pack::proxy_hostnames)
-			&& !is_ip;
+		bool const proxy_hostnames = connectionProxy.proxy_hostnames && !is_ip;
 
 		if (proxy_hostnames
 			&& (boost::get<socks5_stream>(&s)
@@ -6812,6 +6996,11 @@ namespace {
 			, &web->peer_info
 			, aux::generate_peer_id(settings())
 		};
+		pack.route = route.context;
+		pack.route_type = route.type;
+		pack.route_local_endpoint = route.local_endpoint;
+		pack.native_interface_index = route.native_interface_index;
+		pack.route_transport = peer_route::transport_t::tcp;
 
 		std::shared_ptr<peer_connection> c;
 		if (web->type == web_seed_entry::url_seed)
@@ -7517,7 +7706,13 @@ namespace {
 		bool const route_utp = route.transport == peer_route::transport_t::utp;
 		bool const explicit_bind = !route_utp && !route.local_endpoint.address().is_unspecified();
 		error_code route_error;
-		if (route.type == peer_route::type_t::blocked)
+		if (managed_routes() && (!allows_route(route.context, a.address().is_v4()
+			? route_family::ipv4 : route_family::ipv6)
+			|| std::none_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+				, [&](network_route const& r) { return r.binding == route
+					&& (r.family == route_family::ipv4) == a.address().is_v4(); })))
+			route_error = boost::asio::error::access_denied;
+		else if (route.type == peer_route::type_t::blocked)
 			route_error = boost::asio::error::access_denied;
 		else if (route.transport != peer_route::transport_t::automatic
 			&& route.transport != peer_route::transport_t::tcp && !route_utp)
@@ -7897,6 +8092,9 @@ namespace {
 
 		m_torrent_file = info;
 		m_info_hash = m_torrent_file->info_hashes();
+		if (apply_route_policy(m_ses.select_torrent_route_policy(
+			{info_hash(), torrent_file().priv(), valid_metadata()})))
+			m_ses.cancel_route_operations();
 
 		m_size_on_disk = aux::size_on_disk(m_torrent_file->files());
 
@@ -7954,6 +8152,12 @@ namespace {
 
 	bool torrent::attach_peer(peer_connection* p) try
 	{
+		if (managed_routes() && !allows_route(p->route_context()
+			, p->remote().address().is_v4() ? route_family::ipv4 : route_family::ipv6))
+		{
+			p->disconnect(boost::asio::error::access_denied, operation_t::connect);
+			return false;
+		}
 //		INVARIANT_CHECK;
 
 #ifdef TORRENT_SSL_PEERS
@@ -11279,6 +11483,7 @@ namespace {
 		, peer_source_flags_t const source, pex_flags_t flags)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		if (!allows_peer_source(source)) return nullptr;
 
 		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
 
@@ -12275,6 +12480,7 @@ namespace {
 		, seconds32 const retry_interval)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		if (r.route_operation && r.route_operation->aborted) return;
 
 		INVARIANT_CHECK;
 

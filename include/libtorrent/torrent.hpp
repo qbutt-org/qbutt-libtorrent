@@ -90,6 +90,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/deferred_handler.hpp"
 #include "libtorrent/aux_/allocating_handler.hpp"
 #include "libtorrent/aux_/announce_entry.hpp"
+#include "libtorrent/aux_/network_operation.hpp"
 #include "libtorrent/extensions.hpp" // for add_peer_flags_t
 #include "libtorrent/ssl.hpp"
 
@@ -171,6 +172,7 @@ namespace libtorrent {
 		// if the hostname of the web seed has been resolved,
 		// these are its IP addresses
 		std::vector<tcp::endpoint> endpoints;
+		std::shared_ptr<aux::network_operation> route_operation;
 
 		// this is the peer_info field used for the
 		// connection, just to count hash failures
@@ -241,6 +243,7 @@ namespace libtorrent {
 			web_seed_entry::operator=(std::move(rhs));
 			retry = std::move(rhs.retry);
 			endpoints = std::move(rhs.endpoints);
+			route_operation = std::move(rhs.route_operation);
 			peer_info = std::move(rhs.peer_info);
 			supports_keepalive = std::move(rhs.supports_keepalive);
 			resolving = std::move(rhs.resolving);
@@ -288,6 +291,8 @@ namespace libtorrent {
 		// a back reference to the session
 		// this torrent belongs to.
 		aux::session_interface& m_ses;
+		torrent_route_policy m_route_policy;
+		std::vector<std::weak_ptr<aux::network_operation>> m_route_operations;
 
 		// this vector is sorted at all times, by the pointer value.
 		// use sorted_insert() and sorted_find() on it. The GNU STL
@@ -379,6 +384,17 @@ namespace libtorrent {
 
 		// starts the announce timer
 		void start();
+		torrent_route_policy const& route_policy() const { return m_route_policy; }
+		bool managed_routes() const;
+		bool allows_route(peer_route_context context, route_family family) const;
+		bool allows_discovery_socket(aux::listen_socket_handle const& socket) const;
+		bool allows_peer_source(peer_source_flags_t source) const;
+		bool apply_route_policy(torrent_route_policy policy);
+		void invalidate_route(peer_route_context context);
+		std::shared_ptr<aux::network_operation> route_operation(
+			aux::listen_socket_handle const& socket, aux::network_operation::kind_t kind);
+		std::shared_ptr<aux::network_operation> route_operation(
+			network_route route, aux::network_operation::kind_t kind);
 
 		void added()
 		{

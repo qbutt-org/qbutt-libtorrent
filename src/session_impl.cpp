@@ -998,6 +998,140 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		m_peer_route_observer = std::move(observer);
 	}
 
+	error_code session_impl::validate_torrent_route_policy(torrent_route_policy const& policy) const
+	{
+		if (policy.mode == torrent_route_policy::mode_t::session_default)
+			return policy.routes.empty() && policy.pinned == peer_route_context{}
+				? error_code{} : error_code(boost::asio::error::invalid_argument);
+		if (policy.mode != torrent_route_policy::mode_t::managed || policy.routes.size() > 64)
+			return boost::asio::error::invalid_argument;
+		for (auto i = policy.routes.begin(); i != policy.routes.end(); ++i)
+		{
+			auto const& r = i->binding;
+			bool const ipv4 = i->family == route_family::ipv4;
+			if (r.context.path_id == 0 || r.context.generation == 0
+				|| (i->family != route_family::ipv4 && i->family != route_family::ipv6))
+				return boost::asio::error::invalid_argument;
+			if (r.type == route_descriptor::type_t::socks5)
+			{
+				if (!r.proxy_endpoint.address().is_loopback() || r.proxy_endpoint.port() == 0
+					|| r.username.empty() || r.password.empty() || r.username.size() > 255
+					|| r.password.size() > 255 || !r.local_endpoint.address().is_unspecified()
+					|| r.native_interface_index != 0)
+					return boost::asio::error::invalid_argument;
+			}
+			else if (r.type != route_descriptor::type_t::native
+				|| r.local_endpoint.address().is_unspecified()
+				|| r.local_endpoint.address().is_v4() != ipv4)
+				return boost::asio::error::invalid_argument;
+#ifndef TORRENT_WINDOWS
+			if (r.native_interface_index != 0) return boost::asio::error::operation_not_supported;
+#endif
+			for (auto j = policy.routes.begin(); j != i; ++j)
+				if (j->binding.context == r.context && j->family == i->family)
+					return boost::asio::error::invalid_argument;
+			for (auto const& s : m_listen_sockets)
+				if (s->route && s->route->route.context == r.context
+					&& s->route->family == i->family && s->route->route != r)
+					return boost::asio::error::invalid_argument;
+			for (auto const& t : m_torrents)
+				for (auto const& old : t->route_policy().routes)
+					if (old.binding.context == r.context && old.family == i->family && old.binding != r)
+						return boost::asio::error::invalid_argument;
+		}
+		return {};
+	}
+
+	torrent_route_policy session_impl::select_torrent_route_policy(torrent_route_request const& request) const
+	{
+		if (!m_torrent_route_policy_selector) return {};
+#ifndef BOOST_NO_EXCEPTIONS
+		try
+		{
+#endif
+			auto policy = m_torrent_route_policy_selector(request);
+			if (!validate_torrent_route_policy(policy)) return policy;
+#ifndef BOOST_NO_EXCEPTIONS
+		}
+		catch (...) {}
+#endif
+		torrent_route_policy blocked;
+		blocked.mode = torrent_route_policy::mode_t::managed;
+		return blocked;
+	}
+
+	error_code session_impl::set_torrent_route_policy_selector(torrent_route_policy_selector selector)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (m_abort) return boost::asio::error::operation_aborted;
+		std::vector<std::pair<std::shared_ptr<torrent>, torrent_route_policy>> policies;
+#ifndef BOOST_NO_EXCEPTIONS
+		try
+		{
+#endif
+			for (auto const& t : m_torrents)
+			{
+				auto policy = selector ? selector({t->info_hash(), t->torrent_file().priv(), t->valid_metadata()})
+					: torrent_route_policy{};
+				if (auto const ec = validate_torrent_route_policy(policy)) return ec;
+				for (auto const& p : policies)
+					for (auto const& a : p.second.routes)
+						for (auto const& b : policy.routes)
+							if (a.binding.context == b.binding.context && a.family == b.family && a.binding != b.binding)
+								return boost::asio::error::invalid_argument;
+				policies.emplace_back(t, std::move(policy));
+			}
+#ifndef BOOST_NO_EXCEPTIONS
+		}
+		catch (...) { return boost::asio::error::invalid_argument; }
+#endif
+		m_torrent_route_policy_selector = std::move(selector);
+		std::vector<std::shared_ptr<torrent>> changed;
+		for (auto& p : policies)
+			if (p.first->apply_route_policy(std::move(p.second))) changed.push_back(p.first);
+		cancel_route_operations();
+		for (auto const& t : changed)
+		{
+			t->update_want_tick();
+			t->force_tracker_request(aux::time_now(), -1, {});
+#ifndef TORRENT_DISABLE_DHT
+			t->dht_announce();
+#endif
+		}
+		return {};
+	}
+
+	void session_impl::cancel_route_operations()
+	{
+		m_tracker_manager.abort_route_operations();
+#ifndef TORRENT_DISABLE_DHT
+		if (m_dht) m_dht->abort_route_operations();
+#endif
+	}
+
+	error_code session_impl::add_dht_route_node(peer_route_context const context
+		, route_family const family, udp::endpoint const node, bool const router)
+	{
+#ifndef TORRENT_DISABLE_DHT
+		if (!m_dht) return boost::asio::error::operation_not_supported;
+		if ((family != route_family::ipv4 && family != route_family::ipv6)
+			|| node.address().is_unspecified() || node.port() == 0
+			|| node.address().is_v4() != (family == route_family::ipv4))
+			return boost::asio::error::invalid_argument;
+		for (auto const& s : m_listen_sockets)
+			if (s->route && s->route->route.context == context && s->route->family == family
+				&& s->route->enable_dht && s->route_state == udp_route_state::ready)
+			{
+				m_dht->add_route_node(listen_socket_handle(s), node, router);
+				return {};
+			}
+		return boost::asio::error::network_unreachable;
+#else
+		TORRENT_UNUSED(context); TORRENT_UNUSED(family); TORRENT_UNUSED(node); TORRENT_UNUSED(router);
+		return boost::asio::error::operation_not_supported;
+#endif
+	}
+
 	void session_impl::observe_peer_route(peer_route_observation const& observation) const
 	{
 		TORRENT_ASSERT(is_single_thread());
@@ -1016,6 +1150,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	void session_impl::invalidate_peer_route(peer_route_context const context)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		for (auto const& t : m_torrents) t->invalidate_route(context);
+		cancel_route_operations();
 		for (auto i = m_connections.begin(); i != m_connections.end();)
 		{
 			auto const connection = *i++;

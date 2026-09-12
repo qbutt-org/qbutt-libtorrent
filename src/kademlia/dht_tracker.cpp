@@ -340,6 +340,30 @@ namespace libtorrent { namespace dht {
 			n.second.dht.announce(ih, listen_port, flags, f);
 	}
 
+	void dht_tracker::announce(aux::listen_socket_handle const& socket
+		, sha1_hash const& ih, int listen_port, announce_flags_t const flags
+		, std::function<void(std::vector<tcp::endpoint> const&)> f
+		, std::shared_ptr<aux::network_operation> operation)
+	{
+		auto const n = m_nodes.find(socket);
+		if (n != m_nodes.end())
+			n->second.dht.announce(ih, listen_port, flags, std::move(f), std::move(operation));
+	}
+
+	void dht_tracker::add_route_node(aux::listen_socket_handle const& socket
+		, udp::endpoint const& endpoint, bool const router)
+	{
+		auto const n = m_nodes.find(socket);
+		if (n == m_nodes.end()) return;
+		if (router) n->second.dht.add_router_node(endpoint);
+		else n->second.dht.add_node(endpoint);
+	}
+
+	void dht_tracker::abort_route_operations()
+	{
+		for (auto& n : m_nodes) n.second.dht.abort_route_operations();
+	}
+
 	void dht_tracker::sample_infohashes(udp::endpoint const& ep, sha1_hash const& target
 		, std::function<void(node_id
 			, time_duration

@@ -249,20 +249,45 @@ namespace libtorrent {
 			: settings.get_str(settings_pack::user_agent);
 
 		auto const ls = bind_socket();
-		bind_info_t bi = [&ls](){
+		boost::optional<bind_info_t> bi = [&ls]() -> boost::optional<bind_info_t> {
 			if (ls.get() == nullptr)
-				return bind_info_t{};
+				return boost::none;
 			else
 				return bind_info_t{ls.device(), ls.get_local_endpoint().address()};
 		}();
+
+		aux::proxy_settings ps(settings);
+		aux::proxy_settings const* tracker_proxy = ps.proxy_tracker_connections ? &ps : nullptr;
+		if (tracker_req().route_operation)
+		{
+			auto const& route = tracker_req().route_operation->route.binding;
+			if (route.type == route_descriptor::type_t::socks5)
+			{
+				ps = aux::proxy_settings{};
+				ps.type = settings_pack::socks5_pw;
+				ps.hostname = route.proxy_endpoint.address().to_string();
+				ps.port = route.proxy_endpoint.port();
+				ps.username = route.username;
+				ps.password = route.password;
+				ps.require_authentication = true;
+				ps.proxy_hostnames = true;
+				tracker_proxy = &ps;
+				bi = boost::none;
+			}
+			else if (route.type == route_descriptor::type_t::native)
+			{
+				tracker_proxy = nullptr;
+				bi = bind_info_t{ls.device(), route.local_endpoint.address()
+					, route.native_interface_index};
+			}
+		}
 
 		// when sending stopped requests, prefer the cached DNS entry
 		// to avoid being blocked for slow or failing responses. Chances
 		// are that we're shutting down, and this should be a best-effort
 		// attempt. It's not worth stalling shutdown.
-		aux::proxy_settings ps(settings);
 		m_tracker_connection->get(url, seconds(timeout)
-			, ps.proxy_tracker_connections ? &ps : nullptr
+			, tracker_proxy
 			, 5, user_agent, bi
 			, (tracker_req().event == event_t::stopped
 				? aux::resolver_interface::cache_only : aux::resolver_flags{})

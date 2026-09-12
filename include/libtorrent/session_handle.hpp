@@ -49,6 +49,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_id.hpp"
 #include "libtorrent/peer_route.hpp"
 #include "libtorrent/udp_route.hpp"
+#include "libtorrent/torrent_route_policy.hpp"
 #include "libtorrent/io_context.hpp"
 #include "libtorrent/session_types.hpp"
 #include "libtorrent/portmap.hpp" // for portmap_protocol
@@ -105,15 +106,25 @@ namespace libtorrent {
 		// not be valid.
 		bool is_valid() const { return !m_impl.expired(); }
 
-		// Select outgoing BitTorrent TCP routes without changing peer identity,
+		// Select outgoing BitTorrent peer routes without changing peer identity,
 		// torrent ownership, the picker or session limits. An empty selector keeps
 		// upstream routing. Native inherits outgoing_interfaces; SOCKS5's local
 		// transport is bound by the loopback OS route and its relay owns egress.
-		// Trackers, web seeds, discovery and UDP are outside this API.
+		// Tracker, web-seed and discovery admission is owned by the separate
+		// torrent route policy below.
 		// These calls are synchronous barriers on the network thread. Replace the
 		// selector/catalog before invalidating a retired generation, so it cannot
 		// be selected again. Invalidation closes connecting and connected peers.
 		void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer = {});
+
+		// Validate and replace policies for all torrents on the network thread.
+		// Forbidden operations and sockets are cancelled before return. An invalid
+		// replacement leaves the previous callback and policies intact.
+		error_code set_torrent_route_policy_selector(torrent_route_policy_selector selector);
+		// Numeric bootstrap for one ready managed DHT owner. Never resolves names
+		// or adds the endpoint to a different route or family.
+		error_code add_dht_route_node(peer_route_context context, route_family family
+			, udp::endpoint node, bool router = false);
 
 		// Synchronously replace up to 64 UDP descriptors. Unchanged identities
 		// preserve healthy sockets; changing an existing identity is rejected.

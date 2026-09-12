@@ -56,6 +56,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/address.hpp"
 #include "libtorrent/peer_id.hpp"
 #include "libtorrent/peer.hpp" // peer_entry
+#include "libtorrent/aux_/network_operation.hpp"
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/union_endpoint.hpp"
 #include "libtorrent/io_context.hpp"
@@ -133,6 +134,7 @@ enum class event_t : std::uint8_t
 		peer_id pid;
 
 		aux::listen_socket_handle outgoing_socket;
+		std::shared_ptr<aux::network_operation> route_operation;
 
 		// set to true if the .torrent file this tracker announce is for is marked
 		// as private (i.e. has the "priv": 1 key)
@@ -357,6 +359,7 @@ enum class event_t : std::uint8_t
 				= std::weak_ptr<request_callback>()) = delete;
 		void abort_all_requests(bool all = false);
 		void abort_requests(aux::listen_socket_handle const& socket);
+		void abort_route_operations();
 		void stop();
 
 		void remove_request(http_tracker_connection const* c);

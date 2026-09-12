@@ -57,6 +57,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <libtorrent/aux_/time.hpp>
 #include "libtorrent/aux_/throw.hpp"
 #include "libtorrent/aux_/session_settings.hpp"
+#include "libtorrent/aux_/network_operation.hpp"
 #include "libtorrent/alert_types.hpp" // for dht_lookup
 #include "libtorrent/performance_counters.hpp" // for counters
 #include "libtorrent/aux_/ip_helpers.hpp" // for is_v4
@@ -431,7 +432,8 @@ void node::add_node(udp::endpoint const& node)
 void node::get_peers(sha1_hash const& info_hash
 	, std::function<void(std::vector<tcp::endpoint> const&)> dcallback
 	, std::function<void(std::vector<std::pair<node_entry, std::string>> const&)> ncallback
-	, announce_flags_t const flags)
+	, announce_flags_t const flags
+	, std::shared_ptr<aux::network_operation> operation)
 {
 	// search for nodes with ids close to id or with peers
 	// for info-hash id. then send announce_peer to them.
@@ -441,17 +443,19 @@ void node::get_peers(sha1_hash const& info_hash
 		? std::make_shared<dht::obfuscated_get_peers>(*this, info_hash, std::move(dcallback), std::move(ncallback), noseeds)
 		: std::make_shared<dht::get_peers>(*this, info_hash, std::move(dcallback), std::move(ncallback), noseeds);
 
+	ta->set_route_operation(std::move(operation));
 	ta->start();
 }
 
 void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_t const flags
-	, std::function<void(std::vector<tcp::endpoint> const&)> f)
+	, std::function<void(std::vector<tcp::endpoint> const&)> f
+	, std::shared_ptr<aux::network_operation> operation)
 {
 	// Managed UDP contexts currently support outgoing peers only. Retrieve
 	// peers without publishing the relay's source port as an incoming listener.
 	if (m_sock.route_context().path_id != 0)
 	{
-		get_peers(info_hash, std::move(f), {}, flags);
+		get_peers(info_hash, std::move(f), {}, flags, std::move(operation));
 		return;
 	}
 #ifndef TORRENT_DISABLE_LOGGING
@@ -471,7 +475,14 @@ void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_
 
 	get_peers(info_hash, std::move(f)
 		, std::bind(&announce_fun, _1, std::ref(*this)
-		, listen_port, info_hash, flags), flags);
+		, listen_port, info_hash, flags), flags, std::move(operation));
+}
+
+void node::abort_route_operations()
+{
+	std::lock_guard<std::mutex> l(m_mutex);
+	for (auto* const request : m_running_requests)
+		if (request->route_operation_aborted()) request->abort();
 }
 
 void node::direct_request(udp::endpoint const& ep, entry& e

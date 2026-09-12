@@ -96,8 +96,9 @@ namespace libtorrent { namespace aux {
 
 	bool listen_socket_handle::supports_tracker(bool const udp) const
 	{
+		TORRENT_UNUSED(udp);
 		auto s = m_sock.lock();
-		return s && (!s->route || (udp && s->route->enable_trackers
+		return s && (!s->route || (s->route->enable_trackers
 			&& s->route_state == udp_route_state::ready));
 	}
 

@@ -154,9 +154,12 @@ public:
 	void get_peers(sha1_hash const& info_hash
 		, std::function<void(std::vector<tcp::endpoint> const&)> dcallback
 		, std::function<void(std::vector<std::pair<node_entry, std::string>> const&)> ncallback
-		, announce_flags_t flags);
+		, announce_flags_t flags
+		, std::shared_ptr<aux::network_operation> operation = {});
 	void announce(sha1_hash const& info_hash, int listen_port, announce_flags_t flags
-		, std::function<void(std::vector<tcp::endpoint> const&)> f);
+		, std::function<void(std::vector<tcp::endpoint> const&)> f
+		, std::shared_ptr<aux::network_operation> operation = {});
+	void abort_route_operations();
 
 	void direct_request(udp::endpoint const& ep, entry& e
 		, std::function<void(msg const&)> f);

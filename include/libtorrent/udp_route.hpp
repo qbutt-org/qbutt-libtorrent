@@ -17,7 +17,7 @@ enum class udp_route_state { pending, ready, failed, retired };
 struct udp_route
 {
 	peer_route route;
-	enum class family_t { ipv4, ipv6 };
+	using family_t = route_family;
 	family_t family = family_t::ipv4;
 	bool ssl = false;
 	bool enable_utp = true;

@@ -41,6 +41,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/http_connection.hpp"
 #include "libtorrent/aux_/escape_string.hpp"
 #include "libtorrent/aux_/instantiate_connection.hpp"
+#include "libtorrent/aux_/native_route_interface.hpp"
 #include "libtorrent/gzip.hpp"
 #include "libtorrent/parse_url.hpp"
 #include "libtorrent/socket.hpp"
@@ -329,11 +330,16 @@ void http_connection::start(std::string const& hostname, int port
 		{
 			error_code ec;
 			m_sock->open(m_bind_addr->ip.is_v4() ? tcp::v4() : tcp::v6(), ec);
+#ifdef TORRENT_WINDOWS
+			if (!ec && m_bind_addr->native_interface_index != 0)
+				m_sock->set_option(aux::native_route_interface(
+					m_bind_addr->native_interface_index, m_bind_addr->ip.is_v6()), ec);
+#endif
 #if TORRENT_HAS_BINDTODEVICE
 			error_code ignore;
 			bind_device(*m_sock, m_bind_addr->device.c_str(), ignore);
 #endif
-			m_sock->bind(tcp::endpoint(m_bind_addr->ip, 0), ec);
+			if (!ec) m_sock->bind(tcp::endpoint(m_bind_addr->ip, 0), ec);
 			if (ec)
 			{
 				post(m_ios, std::bind(&http_connection::callback

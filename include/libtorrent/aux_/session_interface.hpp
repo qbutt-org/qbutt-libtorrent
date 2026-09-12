@@ -52,6 +52,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/link.hpp" // for torrent_list_index_t
 #include "libtorrent/info_hash.hpp"
 #include "libtorrent/peer_route.hpp"
+#include "libtorrent/torrent_route_policy.hpp"
 #include "libtorrent/aux_/socket_type.hpp"
 #include "libtorrent/ssl.hpp"
 
@@ -217,6 +218,8 @@ namespace aux {
 		// TODO: it would be nice to not have this be part of session_interface
 		virtual proxy_settings proxy() const = 0;
 		virtual peer_route select_peer_route(peer_route_request const&) const = 0;
+		virtual torrent_route_policy select_torrent_route_policy(torrent_route_request const&) const = 0;
+		virtual void cancel_route_operations() = 0;
 		virtual void observe_peer_route(peer_route_observation const&) const = 0;
 
 #if TORRENT_USE_I2P

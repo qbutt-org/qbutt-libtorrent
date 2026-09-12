@@ -97,6 +97,17 @@ namespace libtorrent {
 		return sync_call_ret<error_code>(&session_impl::set_udp_routes, std::move(routes));
 	}
 
+	error_code session_handle::set_torrent_route_policy_selector(torrent_route_policy_selector selector)
+	{
+		return sync_call_ret<error_code>(&session_impl::set_torrent_route_policy_selector, std::move(selector));
+	}
+
+	error_code session_handle::add_dht_route_node(peer_route_context context
+		, route_family family, udp::endpoint node, bool router)
+	{
+		return sync_call_ret<error_code>(&session_impl::add_dht_route_node, context, family, node, router);
+	}
+
 	void session_handle::invalidate_peer_route(peer_route_context context)
 	{
 		sync_call(&session_impl::invalidate_peer_route, context);

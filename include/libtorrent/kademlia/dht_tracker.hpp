@@ -59,6 +59,7 @@ namespace libtorrent {
 #endif
 namespace aux {
 	struct session_settings;
+	struct network_operation;
 }
 }
 
@@ -116,6 +117,13 @@ namespace dht {
 			, std::function<void(std::vector<tcp::endpoint> const&)> f);
 		void announce(sha1_hash const& ih, int listen_port, announce_flags_t flags
 			, std::function<void(std::vector<tcp::endpoint> const&)> f);
+		void announce(aux::listen_socket_handle const& socket, sha1_hash const& ih
+			, int listen_port, announce_flags_t flags
+			, std::function<void(std::vector<tcp::endpoint> const&)> f
+			, std::shared_ptr<aux::network_operation> operation);
+		void add_route_node(aux::listen_socket_handle const& socket
+			, udp::endpoint const& node, bool router);
+		void abort_route_operations();
 
 		void sample_infohashes(udp::endpoint const& ep, sha1_hash const& target
 			, std::function<void(node_id
