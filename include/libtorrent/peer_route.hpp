@@ -22,6 +22,9 @@ struct peer_route_context
 {
 	std::uint64_t path_id = 0;
 	std::uint64_t generation = 0;
+	bool operator==(peer_route_context const& rhs) const
+	{ return path_id == rhs.path_id && generation == rhs.generation; }
+	bool operator!=(peer_route_context const& rhs) const { return !(*this == rhs); }
 };
 
 struct peer_route
@@ -43,6 +46,12 @@ struct peer_route
 	// and requires a supplied address. Other platforms reject a nonzero index.
 	tcp::endpoint local_endpoint;
 	std::uint32_t native_interface_index = 0;
+
+	enum class transport_t { automatic, tcp, utp };
+	// Explicit uTP uses a ready registered UDP context and never falls back
+	// to TCP. Automatic preserves existing session/Native behavior and uses
+	// TCP for selected SOCKS routes.
+	transport_t transport = transport_t::automatic;
 };
 
 struct peer_route_request

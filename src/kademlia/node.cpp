@@ -447,6 +447,13 @@ void node::get_peers(sha1_hash const& info_hash
 void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_t const flags
 	, std::function<void(std::vector<tcp::endpoint> const&)> f)
 {
+	// Managed UDP contexts currently support outgoing peers only. Retrieve
+	// peers without publishing the relay's source port as an incoming listener.
+	if (m_sock.route_context().path_id != 0)
+	{
+		get_peers(info_hash, std::move(f), {}, flags);
+		return;
+	}
 #ifndef TORRENT_DISABLE_LOGGING
 	if (m_observer != nullptr && m_observer->should_log(dht_logger::node))
 	{

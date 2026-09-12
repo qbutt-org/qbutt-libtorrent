@@ -3289,6 +3289,22 @@ namespace {
 	constexpr alert_category_t piece_availability_alert::static_category;
 	constexpr alert_category_t tracker_list_alert::static_category;
 	constexpr alert_category_t peer_route_alert::static_category;
+	constexpr alert_category_t udp_route_alert::static_category;
+
+	udp_route_alert::udp_route_alert(aux::stack_allocator&, peer_route_context context
+		, udp_route::family_t f, bool tls, udp_route_state s, operation_t operation
+		, error_code const& ec)
+		: route(context), family(f), ssl(tls), state(s), op(operation), error(ec)
+	{}
+
+	std::string udp_route_alert::message() const
+	{
+		char const* const states[] = {"pending", "ready", "failed", "retired"};
+		return "UDP route " + std::to_string(route.path_id) + "/" + std::to_string(route.generation)
+			+ (family == udp_route::family_t::ipv4 ? " IPv4 " : " IPv6 ")
+			+ (ssl ? "SSL " : "") + states[static_cast<int>(state)]
+			+ (error ? ": " + error.message() : "");
+	}
 
 	peer_route_alert::peer_route_alert(aux::stack_allocator& alloc, torrent_handle h
 		, tcp::endpoint const& ep, peer_id const& pid, peer_route_context context

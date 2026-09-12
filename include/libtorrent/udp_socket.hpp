@@ -42,10 +42,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/debug.hpp"
 #include "libtorrent/span.hpp"
 #include "libtorrent/flags.hpp"
+#include "libtorrent/operations.hpp"
 #include "libtorrent/aux_/listen_socket_handle.hpp"
 #include "libtorrent/aux_/resolver_interface.hpp"
 
 #include <array>
+#include <functional>
 #include <memory>
 
 namespace libtorrent {
@@ -106,8 +108,9 @@ namespace aux { struct alert_manager; }
 		int local_port() const { return m_bind_port; }
 
 		void set_proxy_settings(aux::proxy_settings const& ps, aux::alert_manager& alerts
-			, aux::resolver_interface& resolver, bool send_local_ep);
-		aux::proxy_settings const& get_proxy_settings() { return m_proxy_settings; }
+			, aux::resolver_interface& resolver, bool send_local_ep
+			, std::function<void(error_code const&, operation_t)> state_handler = {});
+		aux::proxy_settings const& get_proxy_settings() const { return m_proxy_settings; }
 
 		bool is_closed() const { return m_abort; }
 		udp::endpoint local_endpoint(error_code& ec) const

@@ -184,6 +184,7 @@ namespace aux {
 		peer_route::type_t route_type = peer_route::type_t::session_default;
 		tcp::endpoint route_local_endpoint;
 		std::uint32_t native_interface_index = 0;
+		peer_route::transport_t route_transport = peer_route::transport_t::automatic;
 	};
 
 	struct TORRENT_EXTRA_EXPORT peer_connection_hot_members
@@ -872,6 +873,7 @@ namespace aux {
 		peer_route::type_t const m_route_type;
 		tcp::endpoint const m_route_local_endpoint;
 		std::uint32_t const m_native_interface_index;
+		peer_route::transport_t const m_route_transport;
 		std::shared_ptr<peer_route_origin const> const m_route_origin;
 		std::int64_t m_previous_download = 0;
 		std::int64_t m_previous_upload = 0;

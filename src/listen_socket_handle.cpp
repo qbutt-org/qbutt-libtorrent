@@ -41,7 +41,7 @@ namespace libtorrent { namespace aux {
 		auto s = m_sock.lock();
 		TORRENT_ASSERT(s);
 		if (!s) throw_ex<std::bad_weak_ptr>();
-		return s->external_address.external_address();
+		return s->route ? s->route->external_address : s->external_address.external_address();
 	}
 
 	tcp::endpoint listen_socket_handle::get_local_endpoint() const
@@ -58,6 +58,14 @@ namespace libtorrent { namespace aux {
 		TORRENT_ASSERT(s);
 		if (!s) throw_ex<std::bad_weak_ptr>();
 		return s->ssl == transport::ssl;
+	}
+
+	udp::endpoint listen_socket_handle::get_udp_endpoint() const
+	{
+		auto s = m_sock.lock();
+		TORRENT_ASSERT(s);
+		if (!s) throw_ex<std::bad_weak_ptr>();
+		return s->get_local_endpoint();
 	}
 
 	std::string listen_socket_handle::device() const
@@ -78,6 +86,19 @@ namespace libtorrent { namespace aux {
 		auto s = m_sock.lock();
 		if (!s) return false;
 		return s->can_route(a);
+	}
+
+	peer_route_context listen_socket_handle::route_context() const
+	{
+		auto s = m_sock.lock();
+		return s && s->route ? s->route->route.context : peer_route_context{};
+	}
+
+	bool listen_socket_handle::supports_tracker(bool const udp) const
+	{
+		auto s = m_sock.lock();
+		return s && (!s->route || (udp && s->route->enable_trackers
+			&& s->route_state == udp_route_state::ready));
 	}
 
 } }

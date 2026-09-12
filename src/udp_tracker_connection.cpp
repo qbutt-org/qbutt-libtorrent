@@ -44,12 +44,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/random.hpp"
 #include "libtorrent/aux_/session_settings.hpp"
 #include "libtorrent/aux_/resolver_interface.hpp"
+#include "libtorrent/aux_/session_impl.hpp"
 #include "libtorrent/ip_filter.hpp"
 #include "libtorrent/aux_/time.hpp"
 #include "libtorrent/aux_/io.hpp"
 #include "libtorrent/aux_/ip_helpers.hpp" // for is_v6
 #include "libtorrent/peer.hpp"
 #include "libtorrent/error_code.hpp"
+#include "libtorrent/string_util.hpp"
 
 #ifndef TORRENT_DISABLE_LOGGING
 #include "libtorrent/socket_io.hpp"
@@ -57,7 +59,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace libtorrent {
 
-	std::map<address, udp_tracker_connection::connection_cache_entry>
+	std::map<udp_tracker_connection::connection_cache_key, udp_tracker_connection::connection_cache_entry>
 		udp_tracker_connection::m_connection_cache;
 
 	std::mutex udp_tracker_connection::m_cache_mutex;
@@ -96,13 +98,22 @@ namespace libtorrent {
 
 		aux::session_settings const& settings = m_man.settings();
 
-		int const proxy_type = settings.get_int(settings_pack::proxy_type);
+		if (!bind_socket())
+		{
+			tracker_connection::fail(boost::asio::error::bad_descriptor, operation_t::connect);
+			return;
+		}
+		auto const proxy = bind_socket().get()->udp_sock->sock.get_proxy_settings();
+		int const proxy_type = proxy.type;
 
-		if (settings.get_bool(settings_pack::proxy_hostnames)
+		if (proxy.proxy_hostnames
 			&& (proxy_type == settings_pack::socks5
 				|| proxy_type == settings_pack::socks5_pw))
 		{
 			m_hostname = hostname;
+			if (bind_socket().route_context().path_id != 0)
+				m_target.address(bind_socket().get_local_endpoint().address().is_v4()
+					? address(address_v4{}) : address(address_v6{}));
 			m_target.port(std::uint16_t(port));
 			start_announce();
 		}
@@ -260,22 +271,24 @@ namespace libtorrent {
 
 	void udp_tracker_connection::start_announce()
 	{
+		if (m_abort) return;
 		std::unique_lock<std::mutex> l(m_cache_mutex);
-		auto const cc = m_connection_cache.find(m_target.address());
+		auto const now = aux::time_now();
+		for (auto i = m_connection_cache.begin(); i != m_connection_cache.end();)
+		{
+			if (!std::get<0>(i->first) || i->second.expires <= now) i = m_connection_cache.erase(i);
+			else ++i;
+		}
+		auto const cc = m_connection_cache.find({bind_socket(), m_target, m_hostname});
 		if (cc != m_connection_cache.end())
 		{
-			// we found a cached entry! Now, we can only
-			// use if if it hasn't expired
-			if (aux::time_now() < cc->second.expires)
-			{
-				if (tracker_req().kind & tracker_request::scrape_request)
-					send_udp_scrape();
-				else
-					send_udp_announce();
-				return;
-			}
-			// if it expired, remove it from the cache
-			m_connection_cache.erase(cc);
+			m_connection_id = cc->second.connection_id;
+			l.unlock();
+			if (tracker_req().kind & tracker_request::scrape_request)
+				send_udp_scrape();
+			else
+				send_udp_announce();
+			return;
 		}
 		l.unlock();
 
@@ -299,18 +312,15 @@ namespace libtorrent {
 
 	void udp_tracker_connection::close()
 	{
+		m_abort = true;
 		cancel();
 		m_man.remove_request(this);
 	}
 
 	bool udp_tracker_connection::on_receive_hostname(string_view const hostname
-		, span<char const> buf)
+		, int const port, span<char const> buf)
 	{
-		TORRENT_UNUSED(hostname);
-		// just ignore the hostname this came from, pretend that
-		// it's from the same endpoint we sent it to (i.e. the same
-		// port). We have so many other ways of confirming this packet
-		// comes from the tracker anyway, so it's not a big deal
+		if (!string_equal_no_case(hostname, m_hostname) || port != m_target.port()) return false;
 		return on_receive(m_target, buf);
 	}
 
@@ -342,7 +352,7 @@ namespace libtorrent {
 		// if m_target is inaddr_any, it suggests that we
 		// sent the packet through a proxy only knowing
 		// the hostname, in which case this packet might be for us
-		if (!m_target.address().is_unspecified() && m_target != ep)
+		if (m_target.port() != ep.port() || (!m_target.address().is_unspecified() && m_target != ep))
 		{
 #ifndef TORRENT_DISABLE_LOGGING
 			if (cb && cb->should_log())
@@ -444,12 +454,14 @@ namespace libtorrent {
 
 		// reset transaction
 		update_transaction_id();
-		std::int64_t const connection_id = aux::read_int64(buf);
-
-		std::lock_guard<std::mutex> l(m_cache_mutex);
-		connection_cache_entry& cce = m_connection_cache[m_target.address()];
-		cce.connection_id = connection_id;
-		cce.expires = aux::time_now() + seconds(m_man.settings().get_int(settings_pack::udp_tracker_token_expiry));
+		m_connection_id = aux::read_int64(buf);
+		{
+			std::lock_guard<std::mutex> l(m_cache_mutex);
+			if (m_connection_cache.size() >= 1024) m_connection_cache.erase(m_connection_cache.begin());
+			connection_cache_entry& cce = m_connection_cache[{bind_socket(), m_target, m_hostname}];
+			cce.connection_id = m_connection_id;
+			cce.expires = aux::time_now() + seconds(m_man.settings().get_int(settings_pack::udp_tracker_token_expiry));
+		}
 
 		if (!(tracker_req().kind & tracker_request::scrape_request))
 			send_udp_announce();
@@ -530,15 +542,10 @@ namespace libtorrent {
 	{
 		if (m_abort) return;
 
-		auto const i = m_connection_cache.find(m_target.address());
-		// this isn't really supposed to happen
-		TORRENT_ASSERT(i != m_connection_cache.end());
-		if (i == m_connection_cache.end()) return;
-
 		char buf[8 + 4 + 4 + 20];
 		span<char> view = buf;
 
-		aux::write_int64(i->second.connection_id, view); // connection_id
+		aux::write_int64(m_connection_id, view); // connection_id
 		aux::write_int32(action_t::scrape, view); // action (scrape)
 		aux::write_int32(m_transaction_id, view); // transaction_id
 		// info_hash
@@ -700,12 +707,7 @@ namespace libtorrent {
 		tracker_request const& req = tracker_req();
 		aux::session_settings const& settings = m_man.settings();
 
-		auto const i = m_connection_cache.find(m_target.address());
-		// this isn't really supposed to happen
-		TORRENT_ASSERT(i != m_connection_cache.end());
-		if (i == m_connection_cache.end()) return;
-
-		aux::write_int64(i->second.connection_id, out); // connection_id
+		aux::write_int64(m_connection_id, out); // connection_id
 		aux::write_int32(action_t::announce, out); // action (announce)
 		aux::write_int32(m_transaction_id, out); // transaction_id
 		std::copy(req.info_hash.begin(), req.info_hash.end(), out.data()); // info_hash
@@ -719,7 +721,8 @@ namespace libtorrent {
 		// ip address
 		address_v4 announce_ip;
 
-		if (!settings.get_bool(settings_pack::anonymous_mode)
+		if (bind_socket().route_context().path_id == 0
+			&& !settings.get_bool(settings_pack::anonymous_mode)
 			&& !settings.get_str(settings_pack::announce_ip).empty())
 		{
 			error_code ec;

@@ -48,6 +48,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/peer_connection.hpp"
+#include "libtorrent/aux_/native_route_interface.hpp"
 #include "libtorrent/entry.hpp"
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/alert_types.hpp"
@@ -103,25 +104,6 @@ namespace libtorrent {
 
 	namespace {
 
-#ifdef TORRENT_WINDOWS
-	// WinSock uses network byte order for the IPv4 interface index, and host
-	// byte order for IPv6. Source binding alone does not pin the outgoing route.
-	struct native_route_interface
-	{
-		native_route_interface(std::uint32_t index, bool ipv6)
-			: value(ipv6 ? index : htonl(index)) {}
-		template <typename Protocol>
-		int level(Protocol const& p) const { return p.family() == AF_INET ? IPPROTO_IP : IPPROTO_IPV6; }
-		template <typename Protocol>
-		int name(Protocol const& p) const { return p.family() == AF_INET ? IP_UNICAST_IF : IPV6_UNICAST_IF; }
-		template <typename Protocol>
-		void const* data(Protocol const&) const { return &value; }
-		template <typename Protocol>
-		std::size_t size(Protocol const&) const { return sizeof(value); }
-		std::uint32_t value;
-	};
-#endif
-
 	// the limits of the download queue size
 	constexpr int min_request_queue = 2;
 
@@ -163,6 +145,7 @@ namespace libtorrent {
 		, m_route_type(pack.route_type)
 		, m_route_local_endpoint(pack.route_local_endpoint)
 		, m_native_interface_index(pack.native_interface_index)
+		, m_route_transport(pack.route_transport)
 		, m_route_origin(pack.route_type == peer_route::type_t::session_default ? nullptr
 			: std::make_shared<peer_route_origin>(peer_route_origin{pack.route, pack.endp}))
 		, m_disk_thread(*pack.disk_thread)
@@ -455,12 +438,14 @@ namespace libtorrent {
 		// The authenticated loopback socket is not the remote egress socket.
 		// qbutt-net owns physical interface binding for this selected path.
 		tcp::endpoint bound_ip;
-		if (!m_route_local_endpoint.address().is_unspecified())
+		if (m_route_transport == peer_route::transport_t::utp)
+			bound_ip = m_ses.bind_outgoing_socket(m_socket, m_remote.address(), ec, m_route);
+		else if (!m_route_local_endpoint.address().is_unspecified())
 		{
 			bound_ip = m_route_local_endpoint;
 #ifdef TORRENT_WINDOWS
 			if (m_native_interface_index != 0)
-				m_socket.set_option(native_route_interface(m_native_interface_index
+				m_socket.set_option(aux::native_route_interface(m_native_interface_index
 					, m_remote.address().is_v6()), ec);
 #endif
 			if (!ec) m_socket.bind(bound_ip, ec);
@@ -4257,7 +4242,7 @@ namespace libtorrent {
 
 		// A route failure is not evidence that the original peer is bad. Keep
 		// normal retry pacing and let the selector choose another path next time.
-		if (m_route_type == peer_route::type_t::socks5)
+		if (m_route_type == peer_route::type_t::socks5 || m_route_transport == peer_route::transport_t::utp)
 		{
 			disconnect(e, operation_t::connect, normal);
 			return;
@@ -6448,6 +6433,7 @@ namespace libtorrent {
 		}
 		if (m_route_local_endpoint.address().is_unspecified()
 			&& m_route_type != peer_route::type_t::socks5
+			&& m_route_transport != peer_route::transport_t::utp
 			&& !m_settings.get_str(settings_pack::outgoing_interfaces).empty())
 		{
 			if (!m_ses.verify_bound_address(m_local.address()

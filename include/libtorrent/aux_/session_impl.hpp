@@ -43,6 +43,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/session_settings.hpp"
 #include "libtorrent/aux_/session_interface.hpp"
 #include "libtorrent/aux_/session_udp_sockets.hpp"
+#include "libtorrent/udp_route.hpp"
 #include "libtorrent/aux_/socket_type.hpp"
 #include "libtorrent/torrent_peer.hpp"
 #include "libtorrent/torrent_peer_allocator.hpp"
@@ -180,6 +181,15 @@ namespace aux {
 		static constexpr listen_socket_flags_t proxy = 3_bit;
 
 		listen_socket_t() = default;
+		std::unique_ptr<udp_route const> route;
+		udp_route_state route_state = udp_route_state::pending;
+		bool accept_incoming_utp() const override { return !route; }
+		bool use_socks5() const override
+		{
+			if (!udp_sock) return false;
+			auto const type = udp_sock->sock.get_proxy_settings().type;
+			return type == settings_pack::socks5 || type == settings_pack::socks5_pw;
+		}
 
 		// listen_socket_t should not be copied or moved because
 		// references to it are held by the DHT and tracker announce
@@ -731,6 +741,11 @@ namespace aux {
 			void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer);
 			void observe_peer_route(peer_route_observation const&) const override;
 			void invalidate_peer_route(peer_route_context context);
+			error_code set_udp_routes(std::vector<udp_route> routes);
+			void on_udp_route_state(std::weak_ptr<listen_socket_t> socket
+				, error_code const& ec, operation_t op);
+			void close_udp_route(std::shared_ptr<listen_socket_t> const& socket
+				, udp_route_state state, error_code const& ec, operation_t op);
 
 #ifndef TORRENT_DISABLE_DHT
 			bool is_dht_running() const { return (m_dht.get() != nullptr); }
@@ -793,6 +808,8 @@ namespace aux {
 			void set_external_address(tcp::endpoint const& local_endpoint
 				, address const& ip
 				, ip_source_t source_type, address const& source) override;
+			void set_external_address(aux::listen_socket_handle const& socket
+				, address const& ip, ip_source_t source_type, address const& source) override;
 			external_ip external_address() const override;
 
 			// used when posting synchronous function
@@ -802,7 +819,10 @@ namespace aux {
 
 			// implements session_interface
 			tcp::endpoint bind_outgoing_socket(socket_type& s
-				, address const& remote_address, error_code& ec) const override;
+				, address const& remote_address, error_code& ec
+				, peer_route_context context = {}) const override;
+			bool has_udp_route(peer_route_context context, address const& remote
+				, bool ssl, peer_route::type_t type) const override;
 			bool verify_incoming_interface(address const& addr);
 			bool verify_bound_address(address const& addr, bool utp
 				, error_code& ec) override;

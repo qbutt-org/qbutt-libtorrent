@@ -48,6 +48,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_class_type_filter.hpp"
 #include "libtorrent/peer_id.hpp"
 #include "libtorrent/peer_route.hpp"
+#include "libtorrent/udp_route.hpp"
 #include "libtorrent/io_context.hpp"
 #include "libtorrent/session_types.hpp"
 #include "libtorrent/portmap.hpp" // for portmap_protocol
@@ -113,6 +114,15 @@ namespace libtorrent {
 		// selector/catalog before invalidating a retired generation, so it cannot
 		// be selected again. Invalidation closes connecting and connected peers.
 		void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer = {});
+
+		// Synchronously replace up to 64 UDP descriptors. Unchanged identities
+		// preserve healthy sockets; changing an existing identity is rejected.
+		// Removed identities are drained before return. Socket failures are
+		// reported asynchronously by udp_route_alert and require a new generation.
+		// The caller owns monotonically increasing generations; retired identities
+		// must never be registered again. Registration does not provide DNS policy
+		// or permit unsolicited incoming uTP on these outgoing contexts.
+		error_code set_udp_routes(std::vector<udp_route> routes);
 		void invalidate_peer_route(peer_route_context context);
 
 		// saves settings (i.e. the settings_pack)

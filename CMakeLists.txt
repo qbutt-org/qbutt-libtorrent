@@ -91,6 +91,7 @@ set(libtorrent_include_files
 	peer_id.hpp
 	peer_info.hpp
 	peer_route.hpp
+	udp_route.hpp
 	peer_list.hpp
 	peer_request.hpp
 	performance_counters.hpp
@@ -236,6 +237,7 @@ set(libtorrent_aux_include_files
 	ip_notifier.hpp
 	keepalive.hpp
 	listen_socket_handle.hpp
+	native_route_interface.hpp
 	lsd.hpp
 	merkle.hpp
 	merkle_tree.hpp

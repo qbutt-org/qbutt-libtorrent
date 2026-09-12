@@ -83,6 +83,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/ip_filter.hpp"
 #include "libtorrent/socket.hpp"
 #include "libtorrent/aux_/session_impl.hpp"
+#include "libtorrent/aux_/native_route_interface.hpp"
 #ifndef TORRENT_DISABLE_DHT
 #include "libtorrent/kademlia/dht_tracker.hpp"
 #include "libtorrent/kademlia/types.hpp"
@@ -256,6 +257,7 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 		return std::partition(sockets.begin(), sockets.end()
 			, [&eps](std::shared_ptr<listen_socket_t> const& sock)
 		{
+			if (sock->route) return true;
 			auto match = std::find_if(eps.begin(), eps.end()
 				, [&sock](listen_endpoint_t const& ep)
 			{
@@ -375,6 +377,8 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 
 	bool listen_socket_t::can_route(address const& addr) const
 	{
+		if (route) return route_state == udp_route_state::ready
+			&& local_endpoint.address().is_v4() == addr.is_v4();
 		// if this is a proxy, we assume it can reach everything
 		if (flags & proxy) return true;
 
@@ -1026,6 +1030,199 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				connection->get_socket().close(ec);
 			}
 		}
+		for (auto i = m_listen_sockets.begin(); i != m_listen_sockets.end();)
+		{
+			if (!(*i)->route || (*i)->route->route.context != context) { ++i; continue; }
+			close_udp_route(*i, udp_route_state::retired
+				, boost::asio::error::operation_aborted, operation_t::connect);
+			i = m_listen_sockets.erase(i);
+		}
+	}
+
+	namespace {
+		bool same_udp_identity(udp_route const& lhs, udp_route const& rhs)
+		{
+			return lhs.route.context == rhs.route.context && lhs.family == rhs.family
+				&& lhs.ssl == rhs.ssl;
+		}
+
+		bool same_udp_descriptor(udp_route const& lhs, udp_route const& rhs)
+		{
+			return same_udp_identity(lhs, rhs) && lhs.route.type == rhs.route.type
+				&& lhs.route.transport == rhs.route.transport
+				&& lhs.route.proxy_endpoint == rhs.route.proxy_endpoint
+				&& lhs.route.username == rhs.route.username && lhs.route.password == rhs.route.password
+				&& lhs.route.local_endpoint == rhs.route.local_endpoint
+				&& lhs.route.native_interface_index == rhs.route.native_interface_index
+				&& lhs.external_address == rhs.external_address
+				&& lhs.enable_utp == rhs.enable_utp && lhs.enable_dht == rhs.enable_dht
+				&& lhs.enable_trackers == rhs.enable_trackers;
+		}
+	}
+
+	error_code session_impl::set_udp_routes(std::vector<udp_route> routes)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (m_abort) return boost::asio::error::operation_aborted;
+		if (routes.size() > 64) return boost::asio::error::invalid_argument;
+		for (auto i = routes.begin(); i != routes.end(); ++i)
+		{
+			auto const& r = i->route;
+			bool const ipv4 = i->family == udp_route::family_t::ipv4;
+			bool const socks = r.type == peer_route::type_t::socks5;
+			if (r.context.path_id == 0 || r.context.generation == 0
+				|| (i->family != udp_route::family_t::ipv4 && i->family != udp_route::family_t::ipv6)
+				|| (!socks && r.type != peer_route::type_t::native)
+				|| (i->ssl && (i->enable_dht || i->enable_trackers))
+				|| (!i->external_address.is_unspecified()
+					&& (!is_global(i->external_address) || i->external_address.is_v4() != ipv4))
+				|| (i->enable_dht && i->external_address.is_unspecified()))
+				return boost::asio::error::invalid_argument;
+			if (socks)
+			{
+				if (!r.proxy_endpoint.address().is_loopback() || r.proxy_endpoint.port() == 0
+					|| r.username.empty() || r.password.empty() || r.username.size() > 255
+					|| r.password.size() > 255 || !r.local_endpoint.address().is_unspecified()
+					|| r.native_interface_index != 0)
+					return boost::asio::error::invalid_argument;
+			}
+			else if (r.local_endpoint.address().is_unspecified()
+				|| r.local_endpoint.address().is_v4() != ipv4)
+				return boost::asio::error::invalid_argument;
+#ifndef TORRENT_WINDOWS
+			if (r.native_interface_index != 0) return boost::asio::error::operation_not_supported;
+#endif
+#ifndef TORRENT_SSL_PEERS
+			if (i->ssl) return boost::asio::error::operation_not_supported;
+#endif
+			for (auto j = routes.begin(); j != i; ++j)
+				if (same_udp_identity(*i, *j)) return boost::asio::error::invalid_argument;
+			for (auto const& s : m_listen_sockets)
+				if (s->route && same_udp_identity(*i, *s->route)
+					&& !same_udp_descriptor(*i, *s->route))
+					return boost::asio::error::invalid_argument;
+		}
+
+		// Validation above is atomic. Unchanged descriptors retain their sockets,
+		// association, DHT node and all healthy peer connections.
+		for (auto i = m_listen_sockets.begin(); i != m_listen_sockets.end();)
+		{
+			if (!(*i)->route) { ++i; continue; }
+			auto const wanted = std::find_if(routes.begin(), routes.end()
+				, [&](udp_route const& r) { return same_udp_identity(r, *(*i)->route); });
+			if (wanted != routes.end()) { routes.erase(wanted); ++i; continue; }
+			close_udp_route(*i, udp_route_state::retired
+				, boost::asio::error::operation_aborted, operation_t::connect);
+			i = m_listen_sockets.erase(i);
+		}
+
+		for (auto& descriptor : routes)
+		{
+			auto s = std::make_shared<listen_socket_t>();
+			s->route = std::make_unique<udp_route const>(std::move(descriptor));
+			auto const& r = s->route->route;
+			bool const socks = r.type == peer_route::type_t::socks5;
+			s->ssl = s->route->ssl ? transport::ssl : transport::plaintext;
+			s->flags = socks ? listen_socket_t::proxy : listen_socket_flags_t{};
+			s->udp_sock = std::make_shared<session_udp_socket>(m_io_context, s);
+			auto const physical = socks ? tcp::endpoint(r.proxy_endpoint.address(), 0) : r.local_endpoint;
+			bool const ipv4 = s->route->family == udp_route::family_t::ipv4;
+			// This endpoint describes the remote address family; UDP I/O obtains
+			// its physical bind from udp_sock instead of this logical endpoint.
+			s->local_endpoint = {ipv4 ? address(address_v4{}) : address(address_v6{}), 0};
+			m_listen_sockets.push_back(s);
+			if (m_alerts.should_post<udp_route_alert>())
+				m_alerts.emplace_alert<udp_route_alert>(r.context, s->route->family, s->route->ssl
+					, udp_route_state::pending, operation_t::sock_open, error_code{});
+			error_code ec;
+			s->udp_sock->sock.open(physical.address().is_v4() ? udp::v4() : udp::v6(), ec);
+#ifdef TORRENT_WINDOWS
+			if (!ec && r.native_interface_index != 0)
+				s->udp_sock->sock.set_option(native_route_interface(r.native_interface_index, !ipv4), ec);
+#endif
+			if (!ec) s->udp_sock->sock.bind({physical.address(), physical.port()}, ec);
+			if (ec) { on_udp_route_state(s, ec, operation_t::sock_bind); continue; }
+			if (!socks) s->local_endpoint = {physical.address(), std::uint16_t(s->udp_sock->sock.local_port())};
+			if (!s->route->external_address.is_unspecified())
+				s->external_address.cast_vote(s->route->external_address, source_router, s->route->external_address);
+			set_socket_buffer_size(s->udp_sock->sock, m_settings, ec);
+			if (socks)
+			{
+				aux::proxy_settings proxy;
+				proxy.type = settings_pack::socks5_pw;
+				proxy.hostname = r.proxy_endpoint.address().to_string();
+				proxy.port = r.proxy_endpoint.port();
+				proxy.username = r.username;
+				proxy.password = r.password;
+				proxy.require_authentication = true;
+				proxy.proxy_hostnames = true;
+				s->udp_sock->sock.set_proxy_settings(proxy, m_alerts, get_resolver(), true
+					, [this, weak = std::weak_ptr<listen_socket_t>(s)](error_code const& e, operation_t op)
+					{ on_udp_route_state(weak, e, op); });
+			}
+			else on_udp_route_state(s, {}, operation_t::connect);
+		}
+		return {};
+	}
+
+	bool session_impl::has_udp_route(peer_route_context const context, address const& remote
+		, bool const ssl, peer_route::type_t const type) const
+	{
+		return std::any_of(m_listen_sockets.begin(), m_listen_sockets.end(), [&](auto const& s)
+		{
+			return s->route && s->route->route.context == context && s->route->route.type == type
+				&& s->route->ssl == ssl && s->route->enable_utp && s->route_state == udp_route_state::ready
+				&& s->local_endpoint.address().is_v4() == remote.is_v4();
+		});
+	}
+
+	void session_impl::on_udp_route_state(std::weak_ptr<listen_socket_t> socket
+		, error_code const& ec, operation_t const op)
+	{
+		auto s = socket.lock();
+		if (!s || m_abort || s->route_state == udp_route_state::retired
+			|| s->route_state == udp_route_state::failed) return;
+		if (ec) { close_udp_route(s, udp_route_state::failed, ec, op); return; }
+		s->route_state = udp_route_state::ready;
+		ADD_OUTSTANDING_ASYNC("session_impl::on_udp_packet");
+		s->udp_sock->sock.async_read(aux::make_handler([this, s](error_code const& e)
+			{ on_udp_packet(s->udp_sock, s, s->ssl, e); }, s->udp_handler_storage, *this));
+		if (m_alerts.should_post<udp_route_alert>())
+			m_alerts.emplace_alert<udp_route_alert>(s->route->route.context, s->route->family
+				, s->route->ssl, s->route_state, op, ec);
+#ifndef TORRENT_DISABLE_DHT
+		if (m_dht && s->route->enable_dht) m_dht->new_socket(s);
+#endif
+		for (auto const& t : m_torrents) t->announce_with_tracker();
+	}
+
+	void session_impl::close_udp_route(std::shared_ptr<listen_socket_t> const& s
+		, udp_route_state const state, error_code const& ec, operation_t const op)
+	{
+		if (s->route_state == udp_route_state::retired) return;
+		s->route_state = state;
+		s->udp_sock->sock.close();
+		for (auto i = m_connections.begin(); i != m_connections.end();)
+		{
+			auto const c = *i++;
+			if (!is_utp(c->get_socket()) || c->route_context() != s->route->route.context
+				|| c->remote().address().is_v4() != s->local_endpoint.address().is_v4()
+				|| is_ssl(c->get_socket()) != s->route->ssl) continue;
+			c->disconnect(ec, op, peer_connection_interface::normal);
+			error_code ignored;
+			c->get_socket().close(ignored);
+		}
+		m_utp_socket_manager.remove_udp_socket(s);
+#ifdef TORRENT_SSL_PEERS
+		m_ssl_utp_socket_manager.remove_udp_socket(s);
+#endif
+		m_tracker_manager.abort_requests(s);
+#ifndef TORRENT_DISABLE_DHT
+		if (m_dht && s->route->enable_dht) m_dht->delete_socket(s);
+#endif
+		if (m_alerts.should_post<udp_route_alert>())
+			m_alerts.emplace_alert<udp_route_alert>(s->route->route.context, s->route->family
+				, s->route->ssl, state, op, ec);
 	}
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
@@ -2541,7 +2738,14 @@ namespace {
 			return;
 		}
 
-		auto s = std::static_pointer_cast<aux::listen_socket_t>(si)->udp_sock;
+		auto owner = std::static_pointer_cast<aux::listen_socket_t>(si);
+		if (owner->route && (owner->route_state != udp_route_state::ready
+			|| ((flags & udp_socket::tracker_connection) && !owner->route->enable_trackers)))
+		{
+			ec = boost::asio::error::network_unreachable;
+			return;
+		}
+		auto s = owner->udp_sock;
 
 		s->sock.send_hostname(hostname, port, p, ec, flags);
 
@@ -2568,7 +2772,18 @@ namespace {
 			return;
 		}
 
-		auto s = std::static_pointer_cast<aux::listen_socket_t>(si)->udp_sock;
+		auto owner = std::static_pointer_cast<aux::listen_socket_t>(si);
+		if (owner->route && (owner->route_state != udp_route_state::ready
+			|| owner->local_endpoint.address().is_v4() != ep.address().is_v4()
+			|| ((flags & udp_socket::peer_connection) && !owner->route->enable_utp)
+			|| ((flags & udp_socket::tracker_connection) && !owner->route->enable_trackers)
+			|| (!(flags & (udp_socket::peer_connection | udp_socket::tracker_connection))
+				&& !owner->route->enable_dht)))
+		{
+			ec = boost::asio::error::network_unreachable;
+			return;
+		}
+		auto s = owner->udp_sock;
 
 		// the destination address family matching the local socket's address
 		// family does not hold for proxies that we talk to over IPv4 but can
@@ -2621,6 +2836,9 @@ namespace {
 		COMPLETE_ASYNC("session_impl::on_udp_packet");
 		if (ec)
 		{
+			if (auto owner = ls.lock())
+				if (owner->route && ec != boost::asio::error::operation_aborted)
+					on_udp_route_state(owner, ec, operation_t::sock_read);
 			std::shared_ptr<session_udp_socket> s = socket.lock();
 			udp::endpoint ep;
 			if (s) ep = s->local_endpoint();
@@ -2648,6 +2866,8 @@ namespace {
 
 		std::shared_ptr<session_udp_socket> s = socket.lock();
 		if (!s) return;
+		auto owner = ls.lock();
+		if (!owner || (owner->route && owner->route_state != udp_route_state::ready)) return;
 
 		struct utp_socket_manager& mgr =
 #ifdef TORRENT_SSL_PEERS
@@ -2670,26 +2890,28 @@ namespace {
 
 #ifndef TORRENT_DISABLE_DHT
 					if (m_dht)
-						m_dht->incoming_error(packet.error, packet.from);
+						m_dht->incoming_error(owner, packet.error, packet.from);
 #endif
 
-					m_tracker_manager.incoming_error(packet.error, packet.from);
+					m_tracker_manager.incoming_error(owner, packet.error, packet.from);
 					continue;
 				}
 
 				span<char const> const buf = packet.data;
+				if (owner->route && packet.hostname.empty()
+					&& owner->local_endpoint.address().is_v4() != packet.from.address().is_v4()) continue;
 				if (!packet.hostname.empty())
 				{
 					// only the tracker manager supports receiving UDP packets
 					// from hostnames. If it won't handle it, no one else will
 					// either
-					m_tracker_manager.incoming_packet(packet.hostname, buf);
+					m_tracker_manager.incoming_packet(owner, packet.hostname, packet.from.port(), buf);
 					continue;
 				}
 
 				// give the uTP socket manager first dibs on the packet. Presumably
 				// the majority of packets are uTP packets.
-				if (!mgr.incoming_packet(ls, packet.from, buf))
+				if ((owner->route && !owner->route->enable_utp) || !mgr.incoming_packet(ls, packet.from, buf))
 				{
 					// if it wasn't a uTP packet, try the other users of the UDP
 					// socket
@@ -2707,7 +2929,7 @@ namespace {
 
 					if (!handled)
 					{
-						m_tracker_manager.incoming_packet(packet.from, buf);
+						m_tracker_manager.incoming_packet(owner, packet.from, buf);
 					}
 				}
 			}
@@ -2759,6 +2981,7 @@ namespace {
 				{
 					// fatal errors. Don't try to read from this socket again
 					mgr.socket_drained();
+					if (owner->route) on_udp_route_state(owner, err, operation_t::sock_read);
 					return;
 				}
 				// non-fatal UDP errors get here, we should re-issue the read.
@@ -5197,7 +5420,7 @@ namespace {
 	}
 
 	tcp::endpoint session_impl::bind_outgoing_socket(socket_type& s
-		, address const& remote_address, error_code& ec) const
+		, address const& remote_address, error_code& ec, peer_route_context const context) const
 	{
 		tcp::endpoint bind_ep(address_v4(), 0);
 		if (m_settings.get_int(settings_pack::outgoing_port) > 0)
@@ -5239,6 +5462,16 @@ namespace {
 			std::shared_ptr<listen_socket_t> match;
 			for (auto& ls : m_listen_sockets)
 			{
+				if (context.path_id != 0)
+				{
+					if (!ls->route || ls->route->route.context != context
+						|| ls->route_state != udp_route_state::ready || !ls->route->enable_utp
+						|| ls->ssl != ssl || ls->local_endpoint.address().is_v4() != remote_address.is_v4())
+						continue;
+					impl->m_sock = ls;
+					return ls->local_endpoint;
+				}
+				if (ls->route) continue;
 				// this is almost, but not quite, like can_route()
 				if (!(ls->flags & listen_socket_t::proxy)
 					&& is_v4(ls->local_endpoint) != remote_address.is_v4())
@@ -5486,8 +5719,9 @@ namespace {
 	void session_impl::update_proxy()
 	{
 		for (auto& i : m_listen_sockets)
-			i->udp_sock->sock.set_proxy_settings(proxy(), m_alerts, get_resolver()
-				, settings().get_bool(settings_pack::socks5_udp_send_local_ep));
+			if (!i->route)
+				i->udp_sock->sock.set_proxy_settings(proxy(), m_alerts, get_resolver()
+					, settings().get_bool(settings_pack::socks5_udp_send_local_ep));
 	}
 
 	void session_impl::update_ip_notifier()
@@ -5649,12 +5883,15 @@ namespace {
 	int session_impl::get_listen_port(transport const ssl, aux::listen_socket_handle const& s)
 	{
 		auto socket = s.get();
+		// These contexts own outgoing UDP only. Their loopback/physical bind
+		// port is not evidence of a public incoming peer listener.
+		if (socket->route) return 0;
 		if (socket->ssl != ssl)
 		{
 			auto alt_socket = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
 				, [&](std::shared_ptr<listen_socket_t> const& e)
 			{
-				return e->ssl == ssl
+				return !e->route && e->ssl == ssl
 					&& e->external_address.external_address()
 						== socket->external_address.external_address();
 			});
@@ -5721,6 +5958,7 @@ namespace {
 
 	void session_impl::start_natpmp(std::shared_ptr<aux::listen_socket_t> const& s)
 	{
+		if (s->route) return;
 		// don't create mappings for local IPv6 addresses
 		// they can't be reached from outside of the local network anyways
 		if (is_v6(s->local_endpoint) && is_local(s->local_endpoint.address()))
@@ -5958,6 +6196,7 @@ namespace {
 		for (auto& s : m_listen_sockets)
 		{
 			if (s->ssl != transport::ssl
+				&& (!s->route || (s->route->enable_dht && s->route_state == udp_route_state::ready))
 				&& !(s->flags & listen_socket_t::local_network))
 			{
 				m_dht->new_socket(s);
@@ -6639,6 +6878,7 @@ namespace {
 					, l->udp_sock->sock.local_port(), print_error(ec).c_str());
 			}
 #endif
+			if (!l->sock) continue;
 			ec.clear();
 			set_socket_buffer_size(*l->sock, m_settings, ec);
 #ifndef TORRENT_DISABLE_LOGGING
@@ -6908,7 +7148,7 @@ namespace {
 		{
 			// we're not looking for local peers when we're using a proxy. We
 			// want all traffic to go through the proxy
-			if (s->flags & listen_socket_t::proxy) continue;
+			if (s->route || (s->flags & listen_socket_t::proxy)) continue;
 			if (s->lsd) continue;
 			s->lsd = std::make_shared<lsd>(m_io_context, *this, s->local_endpoint.address()
 				, s->netmask);
@@ -6945,6 +7185,7 @@ namespace {
 
 	void session_impl::start_upnp(std::shared_ptr<aux::listen_socket_t> const& s)
 	{
+		if (s->route) return;
 		// until we support SSDP over an IPv6 network (
 		// https://en.wikipedia.org/wiki/Simple_Service_Discovery_Protocol )
 		// there's no point in starting upnp on one.
@@ -7163,15 +7404,24 @@ namespace {
 	{
 		auto sock = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
 			, [&](std::shared_ptr<listen_socket_t> const& v)
-			{ return v->local_endpoint.address() == local_endpoint.address(); });
+			{ return !v->route && v->local_endpoint.address() == local_endpoint.address(); });
 
 		if (sock != m_listen_sockets.end())
 			set_external_address(*sock, ip, source_type, source);
 	}
 
+	void session_impl::set_external_address(aux::listen_socket_handle const& socket
+		, address const& ip, ip_source_t const source_type, address const& source)
+	{
+		if (auto s = socket.get_ptr().lock()) set_external_address(s, ip, source_type, source);
+	}
+
 	void session_impl::set_external_address(std::shared_ptr<listen_socket_t> const& sock
 		, address const& ip, ip_source_t const source_type, address const& source)
 	{
+		// Managed identities use the descriptor's verified address. Peer votes
+		// cannot replace that source fact within the same generation.
+		if (sock->route) return;
 		if (!sock->external_address.cast_vote(ip, source_type, source)) return;
 
 #ifndef TORRENT_DISABLE_LOGGING

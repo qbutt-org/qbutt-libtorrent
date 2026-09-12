@@ -759,7 +759,7 @@ std::size_t utp_socket_impl::write_some(bool const clear_buffers)
 
 void utp_socket_impl::do_connect(tcp::endpoint const& ep)
 {
-	int const mtu = m_sm.mtu_for_dest(ep.address());
+	int const mtu = m_sm.mtu_for_dest(ep.address(), m_sock);
 	init_mtu(mtu);
 	TORRENT_ASSERT(m_connect_handler == false);
 	m_remote_address = ep.address();

@@ -2917,7 +2917,7 @@ namespace {
 		// and removing entries for non-existent ones
 		std::size_t valid_endpoints = 0;
 		ses.for_each_listen_socket([&](aux::listen_socket_handle const& s) {
-			if (s.is_ssl() != is_ssl)
+			if (s.is_ssl() != is_ssl || !s.supports_tracker(url.compare(0, 6, "udp://") == 0))
 				return;
 			for (auto& aep : aeps)
 			{
@@ -3074,7 +3074,7 @@ namespace {
 		{
 			m_ses.for_each_listen_socket([&](aux::listen_socket_handle const& s)
 			{
-				if (s.is_ssl() != is_ssl_torrent()) return;
+				if (s.route_context().path_id != 0 || s.is_ssl() != is_ssl_torrent()) return;
 				tcp::endpoint const ep = s.get_local_endpoint();
 				if (ep.address().is_unspecified()) return;
 				if (aux::is_v6(ep))
@@ -3478,7 +3478,7 @@ namespace {
 		// out external IP counter (and pass along the IP of the tracker to know
 		// who to attribute this vote to)
 		if (resp.external_ip != address() && !tracker_ip.is_unspecified() && r.outgoing_socket)
-			m_ses.set_external_address(r.outgoing_socket.get_local_endpoint()
+			m_ses.set_external_address(r.outgoing_socket
 				, resp.external_ip
 				, aux::session_interface::source_tracker, tracker_ip);
 
@@ -7514,10 +7514,21 @@ namespace {
 				, static_cast<std::uint8_t>(peerinfo->peer_source()), valid_metadata()});
 
 		bool const local_proxy = route.type == peer_route::type_t::socks5;
-		bool const explicit_bind = !route.local_endpoint.address().is_unspecified();
+		bool const route_utp = route.transport == peer_route::transport_t::utp;
+		bool const explicit_bind = !route_utp && !route.local_endpoint.address().is_unspecified();
 		error_code route_error;
 		if (route.type == peer_route::type_t::blocked)
 			route_error = boost::asio::error::access_denied;
+		else if (route.transport != peer_route::transport_t::automatic
+			&& route.transport != peer_route::transport_t::tcp && !route_utp)
+			route_error = boost::asio::error::invalid_argument;
+		else if (route_utp)
+		{
+			if (!settings().get_bool(settings_pack::enable_outgoing_utp))
+				route_error = boost::asio::error::operation_not_supported;
+			else if (!m_ses.has_udp_route(route.context, a.address(), is_ssl_torrent(), route.type))
+				route_error = boost::asio::error::network_unreachable;
+		}
 		else if (local_proxy && (!route.proxy_endpoint.address().is_loopback()
 			|| route.proxy_endpoint.port() == 0 || route.context.path_id == 0
 			|| route.context.generation == 0 || route.username.empty() || route.password.empty()
@@ -7548,17 +7559,17 @@ namespace {
 			return peer_connect_result::rejected;
 		}
 
-		aux::proxy_settings proxy;
+		aux::proxy_settings connection_proxy;
 		if (route.type == peer_route::type_t::session_default)
-			proxy = m_ses.proxy();
-		else if (local_proxy)
+			connection_proxy = m_ses.proxy();
+		else if (local_proxy && !route_utp)
 		{
-			proxy.type = settings_pack::socks5_pw;
-			proxy.hostname = route.proxy_endpoint.address().to_string();
-			proxy.port = route.proxy_endpoint.port();
-			proxy.username = std::move(route.username);
-			proxy.password = std::move(route.password);
-			proxy.require_authentication = true;
+			connection_proxy.type = settings_pack::socks5_pw;
+			connection_proxy.hostname = route.proxy_endpoint.address().to_string();
+			connection_proxy.port = route.proxy_endpoint.port();
+			connection_proxy.username = std::move(route.username);
+			connection_proxy.password = std::move(route.password);
+			connection_proxy.require_authentication = true;
 		}
 
 		// this is where we determine if we open a regular TCP connection
@@ -7581,10 +7592,11 @@ namespace {
 		else
 #endif
 		{
-			if (!local_proxy && !explicit_bind && settings().get_bool(settings_pack::enable_outgoing_utp)
+			if (route_utp || (route.transport != peer_route::transport_t::tcp
+				&& !local_proxy && !explicit_bind && settings().get_bool(settings_pack::enable_outgoing_utp)
 				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
 					|| peerinfo->supports_utp
-					|| peerinfo->confirmed_supports_utp))
+					|| peerinfo->confirmed_supports_utp)))
 			{
 				sm = m_ses.utp_socket_manager();
 			}
@@ -7645,7 +7657,7 @@ namespace {
 #endif
 
 			aux::socket_type ret = instantiate_connection(m_ses.get_context()
-				, proxy, userdata, sm, true, false);
+				, connection_proxy, userdata, sm, true, false);
 
 #if defined TORRENT_SSL_PEERS
 			if (is_ssl_torrent())
@@ -7675,8 +7687,9 @@ namespace {
 			, our_pid
 			, route.context
 			, route.type
-			, route.local_endpoint
-			, route.native_interface_index
+			, route_utp ? tcp::endpoint{} : route.local_endpoint
+			, route_utp ? 0 : route.native_interface_index
+			, route.transport
 		};
 
 		auto c = std::make_shared<bt_peer_connection>(pack);

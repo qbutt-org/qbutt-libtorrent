@@ -125,14 +125,15 @@ namespace libtorrent { namespace dht {
 	{
 		address const local_address = s.get_local_endpoint().address();
 		auto stored_nid = std::find_if(m_state.nids.begin(), m_state.nids.end()
-			, [&](node_ids_t::value_type const& nid) { return nid.first == local_address; });
+			, [&](node_ids_t::value_type const& nid)
+			{ return s.route_context().path_id == 0 && nid.first == local_address; });
 		node_id const nid = stored_nid != m_state.nids.end() ? stored_nid->second : node_id();
 		// must use piecewise construction because tracker_node::connection_timer
 		// is neither copyable nor movable
 		auto n = m_nodes.emplace(std::piecewise_construct_t(), std::forward_as_tuple(s)
 			, std::forward_as_tuple(m_ioc
 			, s, this, m_settings, nid, m_log, m_counters
-			, std::bind(&dht_tracker::get_node, this, _1, _2)
+			, std::bind(&dht_tracker::get_node, this, s, _1, _2)
 			, m_storage));
 
 		update_storage_node_ids();
@@ -309,13 +310,15 @@ namespace libtorrent { namespace dht {
 		m_storage.update_node_ids(ids);
 	}
 
-	node* dht_tracker::get_node(node_id const& id, std::string const& family_name)
+	node* dht_tracker::get_node(aux::listen_socket_handle const& socket
+		, node_id const& id, std::string const& family_name)
 	{
 		TORRENT_UNUSED(id);
 		for (auto& n : m_nodes)
 		{
 			// TODO: pick the closest node rather than the first
-			if (n.second.dht.protocol_family_name() == family_name)
+			if (n.first.route_context() == socket.route_context()
+				&& n.second.dht.protocol_family_name() == family_name)
 				return &n.second.dht;
 		}
 
@@ -487,7 +490,8 @@ namespace libtorrent { namespace dht {
 		}
 	}
 
-	void dht_tracker::incoming_error(error_code const& ec, udp::endpoint const& ep)
+	void dht_tracker::incoming_error(aux::listen_socket_handle const& socket
+		, error_code const& ec, udp::endpoint const& ep)
 	{
 		if (ec == boost::asio::error::connection_refused
 			|| ec == boost::asio::error::connection_reset
@@ -500,8 +504,8 @@ namespace libtorrent { namespace dht {
 #endif
 			)
 		{
-			for (auto& n : m_nodes)
-				n.second.dht.unreachable(ep);
+			auto const n = m_nodes.find(socket);
+			if (n != m_nodes.end()) n->second.dht.unreachable(ep);
 		}
 	}
 
@@ -570,8 +574,8 @@ namespace libtorrent { namespace dht {
 #endif
 
 		libtorrent::dht::msg const m(m_msg, ep);
-		for (auto& n : m_nodes)
-			n.second.dht.incoming(s, m);
+		auto const n = m_nodes.find(s);
+		if (n != m_nodes.end()) n->second.dht.incoming(s, m);
 		return true;
 	}
 
@@ -623,7 +627,8 @@ namespace {
 		{
 			// use the local rather than external address because if the user is behind NAT
 			// we won't know the external IP on startup
-			ret.nids.emplace_back(n.first.get_local_endpoint().address(), n.second.dht.nid());
+			if (n.first.route_context().path_id == 0)
+				ret.nids.emplace_back(n.first.get_local_endpoint().address(), n.second.dht.nid());
 			auto nodes = save_nodes(n.second.dht);
 			ret.nodes.insert(ret.nodes.end(), nodes.begin(), nodes.end());
 		}
@@ -702,7 +707,8 @@ namespace {
 			// pick a node with the right address family and use its socket
 			auto n = std::find_if(m_nodes.begin(), m_nodes.end()
 				, [&](tracker_nodes_t::value_type const& v)
-					{ return v.first.get_local_endpoint().protocol().family() == addr.protocol().family(); });
+					{ return v.first.route_context() == s.route_context()
+						&& v.first.get_local_endpoint().protocol().family() == addr.protocol().family(); });
 
 			if (n != m_nodes.end())
 				m_send_fun(n->first, addr, m_send_buf, ec, {});

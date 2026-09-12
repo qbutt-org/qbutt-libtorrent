@@ -333,7 +333,7 @@ namespace {
 	void bt_peer_connection::write_dht_port()
 	{
 #ifndef TORRENT_DISABLE_DHT
-		if (m_supports_dht_port && m_ses.has_dht())
+		if (m_supports_dht_port && m_ses.has_dht() && !has_peer_route())
 		{
 			int const port = m_ses.external_udp_port(local_endpoint().address());
 			if (port >= 0) write_dht_port(port);
@@ -2076,7 +2076,7 @@ namespace {
 #endif
 
 		auto const myip = root.dict_find_string_value("yourip");
-		if (!myip.empty())
+		if (!myip.empty() && !has_peer_route())
 		{
 			if (myip.size() == std::tuple_size<address_v4::bytes_type>::value)
 			{

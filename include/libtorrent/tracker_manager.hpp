@@ -47,7 +47,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <tuple>
 #include <functional>
 #include <memory>
-#include <unordered_map>
+#include <map>
 #include <deque>
 
 #include "libtorrent/flags.hpp"
@@ -356,6 +356,7 @@ enum class event_t : std::uint8_t
 			, std::weak_ptr<request_callback> c
 				= std::weak_ptr<request_callback>()) = delete;
 		void abort_all_requests(bool all = false);
+		void abort_requests(aux::listen_socket_handle const& socket);
 		void stop();
 
 		void remove_request(http_tracker_connection const* c);
@@ -366,12 +367,13 @@ enum class event_t : std::uint8_t
 		void sent_bytes(int bytes);
 		void received_bytes(int bytes);
 
-		void incoming_error(error_code const& ec, udp::endpoint const& ep);
-		bool incoming_packet(udp::endpoint const& ep, span<char const> buf);
+		void incoming_error(aux::listen_socket_handle const& socket, error_code const& ec, udp::endpoint const& ep);
+		bool incoming_packet(aux::listen_socket_handle const& socket, udp::endpoint const& ep, span<char const> buf);
 
 		// this is only used for SOCKS packets, since
 		// they may be addressed to hostname
-		bool incoming_packet(string_view hostname, span<char const> buf);
+		bool incoming_packet(aux::listen_socket_handle const& socket, string_view hostname
+			, int port, span<char const> buf);
 
 		void update_transaction_id(
 			std::shared_ptr<udp_tracker_connection> c
@@ -393,7 +395,8 @@ enum class event_t : std::uint8_t
 		// maps transactionid to the udp_tracker_connection
 		// These must use shared_ptr to avoid a dangling reference
 		// if a connection is erased while a timeout event is in the queue
-		std::unordered_map<std::uint32_t, std::shared_ptr<udp_tracker_connection>> m_udp_conns;
+		std::map<std::pair<aux::listen_socket_handle, std::uint32_t>
+			, std::shared_ptr<udp_tracker_connection>> m_udp_conns;
 
 		std::vector<std::shared_ptr<http_tracker_connection>> m_http_conns;
 		std::deque<std::shared_ptr<http_tracker_connection>> m_queued;

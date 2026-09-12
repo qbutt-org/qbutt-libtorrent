@@ -59,6 +59,8 @@ namespace aux {
 	struct TORRENT_EXTRA_EXPORT utp_socket_interface
 	{
 		virtual udp::endpoint get_local_endpoint() = 0;
+		virtual bool use_socks5() const { return false; }
+		virtual bool accept_incoming_utp() const { return true; }
 	protected:
 		virtual ~utp_socket_interface() = default;
 	};
@@ -115,7 +117,7 @@ namespace aux {
 		int loss_multiplier() const { return m_sett.get_int(settings_pack::utp_loss_multiplier); }
 		int cwnd_reduce_timer() const { return m_sett.get_int(settings_pack::utp_cwnd_reduce_timer); }
 
-		int mtu_for_dest(address const& addr) const;
+		int mtu_for_dest(address const& addr, std::weak_ptr<utp_socket_interface> const& sock) const;
 		int num_sockets() const { return int(m_utp_sockets.size()); }
 
 		void defer_ack(utp_socket_impl* s);

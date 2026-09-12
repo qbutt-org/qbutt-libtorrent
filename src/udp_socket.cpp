@@ -71,7 +71,7 @@ using namespace std::placeholders;
 std::size_t const tmp_buffer_size = 513;
 
 // used for SOCKS5 UDP wrapper header
-std::size_t const max_header_size = 255;
+std::size_t const max_header_size = 7 + 255;
 
 // this class hold the state of the SOCKS5 connection to maintain the UDP
 // ASSOCIATE tunnel. It's instantiated on the heap for two reasons:
@@ -83,7 +83,8 @@ std::size_t const max_header_size = 255;
 struct socks5 : std::enable_shared_from_this<socks5>
 {
 	explicit socks5(io_context& ios, aux::listen_socket_handle ls
-		, aux::alert_manager& alerts, aux::resolver_interface& res, bool const send_local_ep)
+		, aux::alert_manager& alerts, aux::resolver_interface& res, bool const send_local_ep
+		, std::function<void(error_code const&, operation_t)> state_handler)
 		: m_socks5_sock(ios)
 		, m_resolver(res)
 		, m_timer(ios)
@@ -91,6 +92,7 @@ struct socks5 : std::enable_shared_from_this<socks5>
 		, m_alerts(alerts)
 		, m_listen_socket(std::move(ls))
 		, m_send_local_ep(send_local_ep)
+		, m_state_handler(std::move(state_handler))
 	{}
 
 	void start(aux::proxy_settings const& ps);
@@ -119,6 +121,8 @@ private:
 	void on_retry_socks_connect(error_code const& e);
 
 	void retry_connection();
+	void fail(error_code const& ec, operation_t op, bool retry = true);
+	void established();
 
 	tcp::socket m_socks5_sock;
 	aux::resolver_interface& m_resolver;
@@ -154,6 +158,8 @@ private:
 
 	// set to true once the tunnel is established
 	bool m_active = false;
+	bool m_bind_ipv6 = false;
+	std::function<void(error_code const&, operation_t)> m_state_handler;
 };
 
 #ifdef TORRENT_HAS_DONT_FRAGMENT
@@ -378,6 +384,12 @@ void udp_socket::wrap(char const* hostname, int const port, span<char const> p
 	, error_code& ec, udp_send_flags_t const flags)
 {
 	using namespace libtorrent::aux;
+	std::size_t const hostlen = std::strlen(hostname);
+	if (hostlen == 0 || hostlen > 255)
+	{
+		ec = boost::asio::error::invalid_argument;
+		return;
+	}
 
 	std::array<char, max_header_size> header;
 	char* h = header.data();
@@ -385,7 +397,6 @@ void udp_socket::wrap(char const* hostname, int const port, span<char const> p
 	write_uint16(0, h); // reserved
 	write_uint8(0, h); // fragment
 	write_uint8(3, h); // atyp
-	std::size_t const hostlen = std::min(std::strlen(hostname), max_header_size - 7);
 	write_uint8(hostlen, h); // hostname len
 	std::memcpy(h, hostname, hostlen);
 	h += hostlen;
@@ -429,12 +440,13 @@ bool udp_socket::unwrap(udp_socket::packet& pack)
 	else if (atyp == 4)
 	{
 		// IPv6
+		if (size <= 22) return false;
 		pack.from = read_v6_endpoint<udp::endpoint>(p);
 	}
-	else
+	else if (atyp == 3)
 	{
 		std::uint8_t const len = read_uint8(p);
-		if (len > pack.data.end() - p) return false;
+		if (len + 2 >= pack.data.end() - p) return false;
 		string_view hostname(p, len);
 		p += len;
 
@@ -444,8 +456,12 @@ bool udp_socket::unwrap(udp_socket::packet& pack)
 		if (!ec)
 			pack.from = udp::endpoint(addr, port);
 		else
+		{
 			pack.hostname = hostname;
+			pack.from = udp::endpoint(address{}, port);
+		}
 	}
+	else return false;
 
 	pack.data = span<char>{p, size - (p - pack.data.data())};
 	return true;
@@ -514,7 +530,8 @@ void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
 }
 
 void udp_socket::set_proxy_settings(aux::proxy_settings const& ps
-	, aux::alert_manager& alerts, aux::resolver_interface& resolver, bool const send_local_ep)
+	, aux::alert_manager& alerts, aux::resolver_interface& resolver, bool const send_local_ep
+	, std::function<void(error_code const&, operation_t)> state_handler)
 {
 	TORRENT_ASSERT(is_single_thread());
 
@@ -534,9 +551,49 @@ void udp_socket::set_proxy_settings(aux::proxy_settings const& ps
 		// connect to socks5 server and open up the UDP tunnel
 
 		m_socks5_connection = std::make_shared<socks5>(m_ioc
-			, m_listen_socket, alerts, resolver, send_local_ep);
+			, m_listen_socket, alerts, resolver, send_local_ep, std::move(state_handler));
 		m_socks5_connection->start(ps);
 	}
+}
+
+void socks5::fail(error_code const& ec, operation_t const op, bool const retry)
+{
+	if (m_alerts.should_post<socks5_alert>())
+		m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, op, ec);
+	if (m_state_handler)
+	{
+		auto handler = std::move(m_state_handler);
+		close();
+		handler(ec, op);
+	}
+	else if (retry)
+	{
+		++m_failures;
+		retry_connection();
+	}
+	else
+	{
+		error_code ignored;
+		m_socks5_sock.close(ignored);
+	}
+}
+
+void socks5::established()
+{
+	if (m_state_handler && (!m_udp_proxy_addr.address().is_loopback()
+		|| m_udp_proxy_addr.port() == 0
+		|| m_udp_proxy_addr.protocol().family() != m_proxy_addr.protocol().family()))
+	{
+		fail(boost::asio::error::access_denied, operation_t::handshake, false);
+		return;
+	}
+	m_active = true;
+	m_failures = 0;
+	m_timer.cancel();
+	if (m_state_handler) m_state_handler({}, operation_t::connect);
+	ADD_OUTSTANDING_ASYNC("socks5::hung_up");
+	boost::asio::async_read(m_socks5_sock, boost::asio::buffer(m_tmp_buf.data(), 10)
+		, std::bind(&socks5::hung_up, self(), _1));
 }
 
 // ===================== SOCKS 5 =========================
@@ -547,9 +604,7 @@ void socks5::start(aux::proxy_settings const& ps)
 	if (ps.username.size() > 255 || ps.password.size() > 255
 		|| (ps.require_authentication && (ps.username.empty() || ps.password.empty())))
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_listen_socket.get_local_endpoint()
-				, operation_t::handshake, socks_error::authentication_error);
+		fail(socks_error::authentication_error, operation_t::handshake, false);
 		return;
 	}
 
@@ -569,11 +624,7 @@ void socks5::on_name_lookup(error_code const& e, std::vector<address> const& ips
 
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_listen_socket.get_local_endpoint()
-				, operation_t::hostname_lookup, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::hostname_lookup);
 		return;
 	}
 
@@ -583,17 +634,14 @@ void socks5::on_name_lookup(error_code const& e, std::vector<address> const& ips
 	// fixed properly.
 	auto const i = std::find_if(ips.begin(), ips.end()
 		, [&](address const& a) {
-			return m_listen_socket.can_route(a);
+			return m_state_handler
+				? a.is_v4() == m_listen_socket.get_udp_endpoint().address().is_v4()
+				: m_listen_socket.can_route(a);
 		});
 
 	if (i == ips.end())
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_listen_socket.get_local_endpoint()
-				, operation_t::hostname_lookup
-				, error_code(boost::system::errc::host_unreachable, generic_category()));
-		++m_failures;
-		retry_connection();
+		fail(boost::asio::error::host_unreachable, operation_t::hostname_lookup);
 		return;
 	}
 
@@ -603,8 +651,7 @@ void socks5::on_name_lookup(error_code const& e, std::vector<address> const& ips
 	m_socks5_sock.open(aux::is_v4(m_proxy_addr) ? tcp::v4() : tcp::v6(), ec);
 	if (ec)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::sock_open, ec);
+		fail(ec, operation_t::sock_open, false);
 		return;
 	}
 
@@ -654,14 +701,13 @@ void socks5::on_name_lookup(error_code const& e, std::vector<address> const& ips
 #endif
 #endif
 
-	tcp::endpoint const bind_ep(m_listen_socket.get_local_endpoint().address(), 0);
+	tcp::endpoint const bind_ep(m_state_handler
+		? m_listen_socket.get_udp_endpoint().address()
+		: m_listen_socket.get_local_endpoint().address(), 0);
 	m_socks5_sock.bind(bind_ep, ec);
 	if (ec)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::sock_bind, ec);
-		++m_failures;
-		retry_connection();
+		fail(ec, operation_t::sock_bind);
 		return;
 	}
 
@@ -686,21 +732,16 @@ void socks5::on_connect_timeout(error_code const& e)
 
 	if (m_abort) return;
 
-	if (m_alerts.should_post<socks5_alert>())
-		m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::connect, errors::timed_out);
-
 	error_code ignore;
 	m_socks5_sock.close(ignore);
-
-	++m_failures;
-	retry_connection();
+	fail(errors::timed_out, operation_t::connect);
 }
 
 void socks5::on_connected(error_code const& e)
 {
 	COMPLETE_ASYNC("socks5::on_connected");
 
-	m_timer.cancel();
+	if (!m_state_handler) m_timer.cancel();
 
 	if (e == boost::asio::error::operation_aborted) return;
 
@@ -709,10 +750,7 @@ void socks5::on_connected(error_code const& e)
 	// we failed to connect to the proxy
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::connect, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::connect);
 		return;
 	}
 
@@ -751,10 +789,7 @@ void socks5::handshake1(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -770,10 +805,7 @@ void socks5::handshake2(error_code const& e)
 
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -785,21 +817,13 @@ void socks5::handshake2(error_code const& e)
 
 	if (version < 5 || (m_proxy_settings.require_authentication && version != 5))
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
-				, socks_error::unsupported_version);
-		error_code ec;
-		m_socks5_sock.close(ec);
+		fail(socks_error::unsupported_version, operation_t::handshake, false);
 		return;
 	}
 
 	if (m_proxy_settings.require_authentication && method != 2)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
-				, socks_error::unsupported_authentication_method);
-		error_code ec;
-		m_socks5_sock.close(ec);
+		fail(socks_error::unsupported_authentication_method, operation_t::handshake, false);
 		return;
 	}
 	if (method == 0)
@@ -810,11 +834,7 @@ void socks5::handshake2(error_code const& e)
 	{
 		if (m_proxy_settings.username.empty())
 		{
-			if (m_alerts.should_post<socks5_alert>())
-				m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
-					, socks_error::username_required);
-			error_code ec;
-			m_socks5_sock.close(ec);
+			fail(socks_error::username_required, operation_t::handshake, false);
 			return;
 		}
 
@@ -835,12 +855,7 @@ void socks5::handshake2(error_code const& e)
 	}
 	else
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
-				, socks_error::unsupported_authentication_method);
-
-		error_code ec;
-		m_socks5_sock.close(ec);
+		fail(socks_error::unsupported_authentication_method, operation_t::handshake, false);
 		return;
 	}
 }
@@ -851,10 +866,7 @@ void socks5::handshake3(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -869,10 +881,7 @@ void socks5::handshake4(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -884,12 +893,8 @@ void socks5::handshake4(error_code const& e)
 
 	if (version != 1 || status != 0)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake
-				, version != 1 ? socks_error::unsupported_authentication_version
-				: socks_error::authentication_error);
-		error_code ec;
-		m_socks5_sock.close(ec);
+		fail(version != 1 ? socks_error::unsupported_authentication_version
+			: socks_error::authentication_error, operation_t::handshake, false);
 		return;
 	}
 
@@ -908,7 +913,7 @@ void socks5::socks_forward_udp()
 
 	if (m_send_local_ep)
 	{
-		auto const local_ep = m_listen_socket.get_local_endpoint();
+		auto const local_ep = m_listen_socket.get_udp_endpoint();
 		write_uint8(aux::is_v4(local_ep) ? 1 : 4, p); // atyp
 		write_endpoint(local_ep, p);
 	}
@@ -932,10 +937,7 @@ void socks5::connect1(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::connect, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::connect);
 		return;
 	}
 
@@ -951,10 +953,7 @@ void socks5::connect2(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -966,19 +965,31 @@ void socks5::connect2(error_code const& e)
 	++p; // RESERVED
 	int const atyp = read_uint8(p); // address type
 
-	if (version != 5 || status != 0) return;
-
-	if (atyp == 1)
+	if (version != 5 || status != 0)
 	{
+		fail(version != 5 ? socks_error::unsupported_version : socks_error::general_failure
+			, operation_t::handshake, false);
+		return;
+	}
+
+	if (atyp == 1 || atyp == 4)
+	{
+		m_bind_ipv6 = atyp == 4;
 		ADD_OUTSTANDING_ASYNC("socks5::read_bindaddr");
 		// save the first byte of the IP address in the buffer. The
 		// read_bindaddr() callback will use it
 		m_tmp_buf[0] = *p;
-		boost::asio::async_read(m_socks5_sock, boost::asio::buffer(m_tmp_buf.data() + 1, 5)
+		boost::asio::async_read(m_socks5_sock, boost::asio::buffer(m_tmp_buf.data() + 1
+			, m_bind_ipv6 ? 17 : 5)
 			, std::bind(&socks5::read_bindaddr, self(), _1));
 	}
 	else if (atyp == 3)
 	{
+		if (m_state_handler)
+		{
+			fail(boost::asio::error::invalid_argument, operation_t::handshake, false);
+			return;
+		}
 		// we need to skip DOMAINNAME to imitate Python socks client
 		std::size_t const len = read_uint8(p);
 		ADD_OUTSTANDING_ASYNC("socks5::read_domainname");
@@ -990,9 +1001,7 @@ void socks5::connect2(error_code const& e)
 	}
 	else
 	{
-		// in this case we need to read more data from the socket
-		// no IPv6 support for UDP socks5
-		TORRENT_ASSERT_FAIL();
+		fail(boost::asio::error::address_family_not_supported, operation_t::handshake, false);
 		return;
 	}
 }
@@ -1004,26 +1013,17 @@ void socks5::read_bindaddr(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
 	using namespace libtorrent::aux;
 
 	char* p = m_tmp_buf.data();
-	m_udp_proxy_addr.address(address_v4(read_uint32(p)));
-	m_udp_proxy_addr.port(read_uint16(p));
+	m_udp_proxy_addr = m_bind_ipv6 ? read_v6_endpoint<udp::endpoint>(p)
+		: read_v4_endpoint<udp::endpoint>(p);
 
-	// we're done!
-	m_active = true;
-	m_failures = 0;
-
-	ADD_OUTSTANDING_ASYNC("socks5::hung_up");
-	boost::asio::async_read(m_socks5_sock, boost::asio::buffer(m_tmp_buf.data(), 10)
-		, std::bind(&socks5::hung_up, self(), _1));
+	established();
 }
 
 void socks5::read_domainname(error_code const& e)
@@ -1033,10 +1033,7 @@ void socks5::read_domainname(error_code const& e)
 	if (m_abort) return;
 	if (e)
 	{
-		if (m_alerts.should_post<socks5_alert>())
-			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::handshake, e);
-		++m_failures;
-		retry_connection();
+		fail(e, operation_t::handshake);
 		return;
 	}
 
@@ -1048,13 +1045,7 @@ void socks5::read_domainname(error_code const& e)
 	m_udp_proxy_addr.address(m_proxy_addr.address());
 	m_udp_proxy_addr.port(read_uint16(p));
 
-	// we're done!
-	m_active = true;
-	m_failures = 0;
-
-	ADD_OUTSTANDING_ASYNC("socks5::hung_up");
-	boost::asio::async_read(m_socks5_sock, boost::asio::buffer(m_tmp_buf.data(), 10)
-		, std::bind(&socks5::hung_up, self(), _1));
+	established();
 }
 
 void socks5::hung_up(error_code const& e)
@@ -1064,10 +1055,14 @@ void socks5::hung_up(error_code const& e)
 
 	if (e == boost::asio::error::operation_aborted || m_abort) return;
 
-	if (e && m_alerts.should_post<socks5_alert>())
-		m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::sock_read, e);
-
-	retry_connection();
+	if (m_state_handler)
+		fail(e ? e : boost::asio::error::connection_reset, operation_t::sock_read);
+	else
+	{
+		if (e && m_alerts.should_post<socks5_alert>())
+			m_alerts.emplace_alert<socks5_alert>(m_proxy_addr, operation_t::sock_read, e);
+		retry_connection();
+	}
 }
 
 void socks5::retry_connection()
@@ -1091,6 +1086,7 @@ void socks5::on_retry_socks_connect(error_code const& e)
 void socks5::close()
 {
 	m_abort = true;
+	m_active = false;
 	error_code ec;
 	m_socks5_sock.close(ec);
 	m_timer.cancel();

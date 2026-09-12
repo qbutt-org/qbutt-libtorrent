@@ -157,7 +157,7 @@ namespace dht {
 		std::vector<lt::dht::dht_status> dht_status() const;
 		void update_stats_counters(counters& c) const;
 
-		void incoming_error(error_code const& ec, udp::endpoint const& ep);
+		void incoming_error(aux::listen_socket_handle const& socket, error_code const& ec, udp::endpoint const& ep);
 		bool incoming_packet(aux::listen_socket_handle const& s
 			, udp::endpoint const& ep, span<char const> buf);
 
@@ -188,7 +188,7 @@ namespace dht {
 		void refresh_timeout(error_code const& e);
 		void refresh_key(error_code const& e);
 		void update_storage_node_ids();
-		node* get_node(node_id const& id, std::string const& family_name);
+		node* get_node(aux::listen_socket_handle const& socket, node_id const& id, std::string const& family_name);
 
 		// implements socket_manager
 		bool has_quota() override;

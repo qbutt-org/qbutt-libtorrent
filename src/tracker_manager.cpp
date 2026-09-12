@@ -253,7 +253,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 	void tracker_manager::remove_request(udp_tracker_connection const* c)
 	{
 		TORRENT_ASSERT(is_single_thread());
-		m_udp_conns.erase(c->transaction_id());
+		m_udp_conns.erase({c->bind_socket(), c->transaction_id()});
 	}
 
 	void tracker_manager::update_transaction_id(
@@ -261,8 +261,9 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		, std::uint32_t tid)
 	{
 		TORRENT_ASSERT(is_single_thread());
-		m_udp_conns.erase(c->transaction_id());
-		m_udp_conns[tid] = std::move(c);
+		m_udp_conns.erase({c->bind_socket(), c->transaction_id()});
+		auto const key = std::make_pair(c->bind_socket(), tid);
+		m_udp_conns[key] = std::move(c);
 	}
 
 	void tracker_manager::queue_request(
@@ -306,7 +307,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		else if (protocol == "udp")
 		{
 			auto con = std::make_shared<udp_tracker_connection>(ios, *this, std::move(req), c);
-			m_udp_conns[con->transaction_id()] = con;
+			m_udp_conns[{con->bind_socket(), con->transaction_id()}] = con;
 			con->start();
 			return;
 		}
@@ -318,7 +319,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 				, "", seconds32(0)));
 	}
 
-	bool tracker_manager::incoming_packet(udp::endpoint const& ep
+	bool tracker_manager::incoming_packet(aux::listen_socket_handle const& socket, udp::endpoint const& ep
 		, span<char const> const buf)
 	{
 		TORRENT_ASSERT(is_single_thread());
@@ -342,7 +343,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		if (action > 3) return false;
 
 		std::uint32_t const transaction = aux::read_uint32(ptr);
-		auto const i = m_udp_conns.find(transaction);
+		auto const i = m_udp_conns.find({socket, transaction});
 
 		if (i == m_udp_conns.end())
 		{
@@ -362,15 +363,19 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		return p->on_receive(ep, buf);
 	}
 
-	void tracker_manager::incoming_error(error_code const&
-		, udp::endpoint const&)
+	void tracker_manager::incoming_error(aux::listen_socket_handle const& socket, error_code const& ec
+		, udp::endpoint const& ep)
 	{
 		TORRENT_ASSERT(is_single_thread());
-		// TODO: 2 implement
+		std::vector<std::shared_ptr<udp_tracker_connection>> requests;
+		for (auto const& request : m_udp_conns)
+			if (request.second->bind_socket() == socket && request.second->m_target == ep)
+				requests.push_back(request.second);
+		for (auto const& request : requests) request->fail(ec, operation_t::sock_read);
 	}
 
-	bool tracker_manager::incoming_packet(string_view const hostname
-		, span<char const> const buf)
+	bool tracker_manager::incoming_packet(aux::listen_socket_handle const& socket
+		, string_view const hostname, int const port, span<char const> const buf)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		// ignore packets smaller than 8 bytes
@@ -383,7 +388,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 		if (action > 3) return false;
 
 		std::uint32_t const transaction = aux::read_uint32(ptr);
-		auto const i = m_udp_conns.find(transaction);
+		auto const i = m_udp_conns.find({socket, transaction});
 
 		if (i == m_udp_conns.end())
 		{
@@ -398,7 +403,7 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 
 		std::shared_ptr<udp_tracker_connection> const p = i->second;
 		// on_receive() may remove the tracker connection from the list
-		return p->on_receive_hostname(hostname, buf);
+		return p->on_receive_hostname(hostname, port, buf);
 	}
 
 	void tracker_manager::send_hostname(aux::listen_socket_handle const& sock
@@ -480,6 +485,18 @@ constexpr tracker_request_flags_t tracker_request::i2p;
 
 		for (auto const& c : close_udp_connections)
 			c->close();
+	}
+
+	void tracker_manager::abort_requests(aux::listen_socket_handle const& socket)
+	{
+		std::vector<std::shared_ptr<udp_tracker_connection>> requests;
+		for (auto const& request : m_udp_conns)
+			if (request.second->bind_socket() == socket) requests.push_back(request.second);
+		for (auto const& request : requests)
+		{
+			request->close();
+			request->tracker_connection::fail(boost::asio::error::operation_aborted, operation_t::sock_read);
+		}
 	}
 
 	bool tracker_manager::empty() const

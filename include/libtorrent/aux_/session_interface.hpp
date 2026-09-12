@@ -148,6 +148,8 @@ namespace aux {
 		virtual void set_external_address(tcp::endpoint const& local_endpoint
 			, address const& ip
 			, ip_source_t source_type, address const& source) = 0;
+		virtual void set_external_address(aux::listen_socket_handle const& socket
+			, address const& ip, ip_source_t source_type, address const& source) = 0;
 		virtual external_ip external_address() const = 0;
 
 		virtual disk_interface& disk_thread() = 0;
@@ -201,7 +203,9 @@ namespace aux {
 
 		// ask for which interface and port to bind outgoing peer connections on
 		virtual tcp::endpoint bind_outgoing_socket(socket_type& s, address const&
-			remote_address, error_code& ec) const = 0;
+			remote_address, error_code& ec, peer_route_context context = {}) const = 0;
+		virtual bool has_udp_route(peer_route_context context, address const& remote
+			, bool ssl, peer_route::type_t type) const = 0;
 		virtual bool verify_bound_address(address const& addr, bool utp
 			, error_code& ec) = 0;
 

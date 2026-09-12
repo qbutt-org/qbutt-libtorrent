@@ -86,7 +86,8 @@ namespace aux {
 		}
 	}
 
-	int utp_socket_manager::mtu_for_dest(address const& addr) const
+	int utp_socket_manager::mtu_for_dest(address const& addr
+		, std::weak_ptr<utp_socket_interface> const& sock) const
 	{
 		int mtu = 0;
 		if (aux::is_teredo(addr)) mtu = TORRENT_TEREDO_MTU;
@@ -94,12 +95,12 @@ namespace aux {
 
 		mtu -= TORRENT_UDP_HEADER;
 
-		if (m_sett.get_int(settings_pack::proxy_type) == settings_pack::socks5
-			|| m_sett.get_int(settings_pack::proxy_type) == settings_pack::socks5_pw)
+		auto const owner = sock.lock();
+		if (owner && owner->use_socks5())
 		{
 			// this is for the IP layer
-			// assume the proxy is running over IPv4
-			mtu -= TORRENT_IPV4_HEADER;
+			mtu -= owner->get_local_endpoint().address().is_v4()
+				? TORRENT_IPV4_HEADER : TORRENT_IPV6_HEADER;
 
 			// this is for the SOCKS layer
 			mtu -= TORRENT_SOCKS5_HEADER;
@@ -156,7 +157,8 @@ namespace aux {
 
 		// first test to see if it's the same socket as last time
 		// in most cases it is
-		if (m_last_socket && m_last_socket->match(ep, id))
+		if (m_last_socket && m_last_socket->m_sock.lock() == socket.lock()
+			&& m_last_socket->match(ep, id))
 		{
 			return m_last_socket->incoming_packet(p, ep, receive_time);
 		}
@@ -176,7 +178,8 @@ namespace aux {
 
 		for (; r.first != r.second; ++r.first)
 		{
-			if (!r.first->second->match(ep, id)) continue;
+			if (r.first->second->m_sock.lock() != socket.lock()
+				|| !r.first->second->match(ep, id)) continue;
 			bool const ret = r.first->second->incoming_packet(p, ep, receive_time);
 			if (ret) m_last_socket = r.first->second.get();
 			return ret;
@@ -191,6 +194,8 @@ namespace aux {
 		// create a new utp_stream
 		if (ph->get_type() == ST_SYN)
 		{
+			auto const owner = socket.lock();
+			if (!owner || !owner->accept_incoming_utp()) return false;
 			// possible SYN flood. Just ignore
 			if (int(m_utp_sockets.size()) > m_sett.get_int(settings_pack::connections_limit) * 2)
 				return false;
@@ -213,7 +218,7 @@ namespace aux {
 				str = boost::get<utp_stream>(&c);
 
 			TORRENT_ASSERT(str);
-			int const mtu = mtu_for_dest(ep.address());
+			int const mtu = mtu_for_dest(ep.address(), socket);
 			str->get_impl()->init_mtu(mtu);
 			str->get_impl()->m_sock = std::move(socket);
 			bool const ret = str->get_impl()->incoming_packet(p, ep, receive_time);

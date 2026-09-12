@@ -41,6 +41,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <tuple>
 
 #include "libtorrent/udp_socket.hpp"
 #include "libtorrent/tracker_manager.hpp"
@@ -89,7 +90,7 @@ namespace libtorrent {
 		void start_announce();
 
 		bool on_receive(udp::endpoint const& ep, span<char const> buf);
-		bool on_receive_hostname(string_view hostname, span<char const> buf);
+		bool on_receive_hostname(string_view hostname, int port, span<char const> buf);
 		bool on_connect_response(span<char const> buf);
 		bool on_announce_response(span<char const> buf);
 		bool on_scrape_response(span<char const> buf);
@@ -116,8 +117,10 @@ namespace libtorrent {
 			time_point expires;
 		};
 
-		static std::map<address, connection_cache_entry> m_connection_cache;
+		using connection_cache_key = std::tuple<aux::listen_socket_handle, udp::endpoint, std::string>;
+		static std::map<connection_cache_key, connection_cache_entry> m_connection_cache;
 		static std::mutex m_cache_mutex;
+		std::int64_t m_connection_id = 0;
 
 		udp::endpoint m_target;
 

@@ -59,6 +59,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_request.hpp"
 #include "libtorrent/performance_counters.hpp"
 #include "libtorrent/operations.hpp" // for operation_t enum
+#include "libtorrent/udp_route.hpp"
 #include "libtorrent/close_reason.hpp"
 #include "libtorrent/piece_block.hpp"
 #include "libtorrent/aux_/escape_string.hpp" // for convert_from_native
@@ -99,7 +100,7 @@ namespace libtorrent {
 	constexpr int user_alert_id = 10000;
 
 	// this constant represents "max_alert_index" + 1
-	constexpr int num_alert_types = 106;
+	constexpr int num_alert_types = 107;
 
 	// internal
 	constexpr int abi_alert_count = 128;
@@ -3130,6 +3131,22 @@ TORRENT_VERSION_NAMESPACE_3_END
 		error_code const error;
 		std::int64_t const route_payload_download;
 		std::int64_t const route_payload_upload;
+	};
+
+	struct TORRENT_EXPORT udp_route_alert final : alert
+	{
+		TORRENT_UNEXPORT udp_route_alert(aux::stack_allocator&, peer_route_context context
+			, udp_route::family_t family, bool ssl, udp_route_state state
+			, operation_t op, error_code const& ec);
+		TORRENT_DEFINE_ALERT_PRIO(udp_route_alert, 106, alert_priority::high)
+		static constexpr alert_category_t static_category = alert_category::status | alert_category::error;
+		std::string message() const override;
+		peer_route_context const route;
+		udp_route::family_t const family;
+		bool const ssl;
+		udp_route_state const state;
+		operation_t const op;
+		error_code const error;
 	};
 
 	// internal

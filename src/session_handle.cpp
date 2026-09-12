@@ -92,6 +92,11 @@ namespace libtorrent {
 		sync_call(&session_impl::set_peer_route_selector, std::move(selector), std::move(observer));
 	}
 
+	error_code session_handle::set_udp_routes(std::vector<udp_route> routes)
+	{
+		return sync_call_ret<error_code>(&session_impl::set_udp_routes, std::move(routes));
+	}
+
 	void session_handle::invalidate_peer_route(peer_route_context context)
 	{
 		sync_call(&session_impl::invalidate_peer_route, context);

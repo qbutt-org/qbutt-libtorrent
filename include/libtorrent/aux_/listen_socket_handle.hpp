@@ -37,6 +37,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/address.hpp"
 #include "libtorrent/socket.hpp" // for tcp::endpoint
+#include "libtorrent/peer_route.hpp"
 #include <memory>
 
 namespace libtorrent { namespace aux {
@@ -62,7 +63,10 @@ namespace libtorrent { namespace aux {
 
 		address get_external_address() const;
 		tcp::endpoint get_local_endpoint() const;
+		udp::endpoint get_udp_endpoint() const;
 		bool can_route(address const&) const;
+		peer_route_context route_context() const;
+		bool supports_tracker(bool udp) const;
 
 		std::string device() const;
 
