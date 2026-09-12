@@ -4242,7 +4242,7 @@ namespace libtorrent {
 
 		// A route failure is not evidence that the original peer is bad. Keep
 		// normal retry pacing and let the selector choose another path next time.
-		if (m_route_type == peer_route::type_t::socks5 || m_route_transport == peer_route::transport_t::utp)
+		if (has_peer_route())
 		{
 			disconnect(e, operation_t::connect, normal);
 			return;
