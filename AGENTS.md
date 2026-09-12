@@ -1,6 +1,6 @@
-# qbutt-lt
+# qbutt-libtorrent
 
-qbutt-lt is the standalone public libtorrent component of qbutt. Preserve the
+qbutt-libtorrent is the standalone public libtorrent component of qbutt. Preserve the
 upstream source layout, license notices, native routing and public source history.
 `upstream-lock.json` records the reviewed upstream revision. Keep the public
 repository outside GitHub's fork network, with only `main` published.
