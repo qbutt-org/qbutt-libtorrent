@@ -987,10 +987,26 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 #endif
 	}
 
-	void session_impl::set_peer_route_selector(peer_route_selector selector)
+	void session_impl::set_peer_route_selector(peer_route_selector selector, peer_route_observer observer)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		m_peer_route_selector = std::move(selector);
+		m_peer_route_observer = std::move(observer);
+	}
+
+	void session_impl::observe_peer_route(peer_route_observation const& observation) const
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (!m_peer_route_observer) return;
+#ifndef BOOST_NO_EXCEPTIONS
+		try
+		{
+#endif
+			m_peer_route_observer(observation);
+#ifndef BOOST_NO_EXCEPTIONS
+		}
+		catch (...) {}
+#endif
 	}
 
 	void session_impl::invalidate_peer_route(peer_route_context const context)

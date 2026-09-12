@@ -213,6 +213,7 @@ namespace aux {
 		// TODO: it would be nice to not have this be part of session_interface
 		virtual proxy_settings proxy() const = 0;
 		virtual peer_route select_peer_route(peer_route_request const&) const = 0;
+		virtual void observe_peer_route(peer_route_observation const&) const = 0;
 
 #if TORRENT_USE_I2P
 		virtual char const* i2p_session() const = 0;

@@ -4363,6 +4363,7 @@ namespace {
 						continue;
 
 					TORRENT_ASSERT(get_hash_picker().piece_verified(verified_piece));
+					observe_verified_routes(verified_piece);
 					m_picker->piece_flushed(verified_piece);
 					update_gauge();
 					we_have(verified_piece);
@@ -4403,6 +4404,30 @@ namespace {
 		return ret;
 	}
 
+	void torrent::observe_verified_routes(piece_index_t const index)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		// Origin belongs to the accepted block, never to a torrent_peer's current
+		// connection. Take it once so disk retries/rechecks cannot credit it again.
+		auto const routes = m_picker->take_block_routes(index);
+		if (settings().get_bool(settings_pack::disable_hash_checks)) return;
+		for (int block = 0; block < int(routes.size()); ++block)
+		{
+			auto const& origin = routes[block];
+			if (!origin) continue;
+			peer_route_observation observation;
+			observation.event = peer_route_observation::event_t::verified;
+			observation.info_hashes = info_hash();
+			observation.peer = origin->peer;
+			observation.route = origin->route;
+			auto const request = to_req(piece_block(index, block));
+			for (auto const& slice : m_torrent_file->map_block(index, request.start, request.length))
+				if (!m_torrent_file->files().pad_file_at(slice.file_index))
+					observation.verified_download += slice.size;
+			if (observation.verified_download > 0) m_ses.observe_peer_route(observation);
+		}
+	}
+
 	// this is called when the piece hash is checked as correct. Note
 	// that the piece picker and the torrent won't necessarily consider
 	// us to have this piece yet, since it might not have been flushed
@@ -4427,6 +4452,7 @@ namespace {
 		set_need_save_resume(torrent_handle::if_download_progress);
 
 		inc_stats_counter(counters::num_piece_passed);
+		observe_verified_routes(index);
 
 		if (settings().get_int(settings_pack::suggest_mode)
 			== settings_pack::suggest_read_cache)
@@ -7485,7 +7511,7 @@ namespace {
 		if (!peerinfo->is_i2p_addr)
 #endif
 			route = m_ses.select_peer_route({info_hash(), a, m_torrent_file->priv()
-				, static_cast<std::uint8_t>(peerinfo->peer_source())});
+				, static_cast<std::uint8_t>(peerinfo->peer_source()), valid_metadata()});
 
 		bool const local_proxy = route.type == peer_route::type_t::socks5;
 		bool const explicit_bind = !route.local_endpoint.address().is_unspecified();

@@ -112,7 +112,7 @@ namespace libtorrent {
 		// These calls are synchronous barriers on the network thread. Replace the
 		// selector/catalog before invalidating a retired generation, so it cannot
 		// be selected again. Invalidation closes connecting and connected peers.
-		void set_peer_route_selector(peer_route_selector selector);
+		void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer = {});
 		void invalidate_peer_route(peer_route_context context);
 
 		// saves settings (i.e. the settings_pack)

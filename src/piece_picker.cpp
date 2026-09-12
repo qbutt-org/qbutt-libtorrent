@@ -321,6 +321,7 @@ namespace libtorrent {
 			}
 			++block_idx;
 			info.peer = nullptr;
+			info.route.reset();
 #if TORRENT_USE_ASSERTS
 			info.piece_index = piece;
 			info.peers.clear();
@@ -353,6 +354,7 @@ namespace libtorrent {
 
 		// since we're removing a downloading_piece, we also need to free its
 		// blocks that are allocated from the m_block_info array.
+		for (auto& block : mutable_blocks_for_piece(*i)) block.route.reset();
 		m_free_block_infos.push_back(i->info_idx);
 
 		TORRENT_ASSERT(find_dl_piece(download_state, i->index) == i);
@@ -1136,6 +1138,7 @@ namespace libtorrent {
 					continue;
 				}
 				info.peer = nullptr;
+				info.route.reset();
 				info.state = block_info::state_none;
 			}
 			i = update_piece_state(i);
@@ -3308,7 +3311,8 @@ get_out:
 		return m_piece_map[piece].peer_count + m_seeds;
 	}
 
-	bool piece_picker::mark_as_writing(piece_block const block, torrent_peer* peer)
+	bool piece_picker::mark_as_writing(piece_block const block, torrent_peer* peer
+		, std::shared_ptr<peer_route_origin const> route)
 	{
 #ifdef TORRENT_EXPENSIVE_INVARIANT_CHECKS
 		INVARIANT_CHECK;
@@ -3354,6 +3358,7 @@ get_out:
 
 			info.state = block_info::state_writing;
 			info.peer = peer;
+			info.route = std::move(route);
 			info.num_peers = 0;
 #if TORRENT_USE_ASSERTS
 			info.peers.clear();
@@ -3381,6 +3386,7 @@ get_out:
 
 			++i->writing;
 			info.state = block_info::state_writing;
+			info.route = std::move(route);
 			TORRENT_ASSERT(info.piece_index == block.piece_index);
 
 			// all other requests for this block should have been
@@ -3393,6 +3399,21 @@ get_out:
 			update_piece_state(i);
 		}
 		return true;
+	}
+
+	std::vector<std::shared_ptr<peer_route_origin const>> piece_picker::take_block_routes(piece_index_t const piece)
+	{
+		std::vector<std::shared_ptr<peer_route_origin const>> ret;
+		auto const state = m_piece_map[piece].download_queue();
+		if (state == piece_pos::piece_open) return ret;
+		auto const i = find_dl_piece(state, piece);
+		auto const blocks = mutable_blocks_for_piece(*i);
+		if (std::none_of(blocks.begin(), blocks.end(), [](block_info const& block) { return bool(block.route); }))
+			return ret;
+		ret.reserve(blocks.size());
+		for (auto& block : blocks)
+			ret.push_back(std::move(block.route));
+		return ret;
 	}
 
 	void piece_picker::started_hash_job(piece_index_t piece)
@@ -3512,6 +3533,7 @@ get_out:
 		if (info.state == block_info::state_writing) --i->writing;
 
 		info.peer = nullptr;
+		info.route.reset();
 		info.state = block_info::state_none;
 		if (i->passed_hash_check)
 		{
@@ -3575,6 +3597,7 @@ get_out:
 		{
 			--i->writing;
 			info.state = block_info::state_none;
+			info.route.reset();
 			// i may be invalid after this call
 			i = update_piece_state(i);
 

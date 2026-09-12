@@ -163,6 +163,8 @@ namespace libtorrent {
 		, m_route_type(pack.route_type)
 		, m_route_local_endpoint(pack.route_local_endpoint)
 		, m_native_interface_index(pack.native_interface_index)
+		, m_route_origin(pack.route_type == peer_route::type_t::session_default ? nullptr
+			: std::make_shared<peer_route_origin>(peer_route_origin{pack.route, pack.endp}))
 		, m_disk_thread(*pack.disk_thread)
 		, m_ios(*pack.ios)
 		, m_work(make_work_guard(m_ios))
@@ -3074,7 +3076,7 @@ namespace libtorrent {
 		bool const multi = picker.num_peers(block_finished) > 1;
 //		std::fprintf(stderr, "peer_connection mark_as_writing peer: %p piece: %d block: %d\n"
 //			, peer_info_struct(), block_finished.piece_index, block_finished.block_index);
-		picker.mark_as_writing(block_finished, peer_info_struct());
+		picker.mark_as_writing(block_finished, peer_info_struct(), m_route_origin);
 
 		// this is for a future per-block request feature
 #if 0
@@ -4515,6 +4517,7 @@ namespace libtorrent {
 
 		if (t)
 		{
+			observe_route(peer_route_observation::event_t::closed, ec, op);
 			if (has_peer_route() && t->alerts().should_post<peer_route_alert>())
 				t->alerts().emplace_alert<peer_route_alert>(handle, remote(), pid(), m_route
 					, op, ec, m_statistics.total_payload_download() - m_previous_download
@@ -4898,6 +4901,35 @@ namespace libtorrent {
 #endif
 	}
 
+	void peer_connection::observe_route(peer_route_observation::event_t const event
+		, error_code const& error, operation_t const operation, int const tick_interval_ms)
+	{
+		if (!has_peer_route()) return;
+		auto const t = m_torrent.lock();
+		if (!t) return;
+		peer_route_observation observation;
+		observation.event = event;
+		observation.info_hashes = t->info_hash();
+		observation.peer = m_remote;
+		observation.route = m_route;
+		observation.operation = operation;
+		observation.error = error;
+		auto const downloaded = m_statistics.total_payload_download() - m_previous_download;
+		auto const uploaded = m_statistics.total_payload_upload() - m_previous_upload;
+		observation.payload_download = downloaded - m_route_observed_download;
+		observation.payload_upload = uploaded - m_route_observed_upload;
+		m_route_observed_download = downloaded;
+		m_route_observed_upload = uploaded;
+		if (event == peer_route_observation::event_t::activity && !m_connecting && !in_handshake())
+		{
+			if (has_peer_choked()) observation.choked_duration_ms = tick_interval_ms;
+			else if (m_outstanding_bytes > 0) observation.demand_duration_ms = tick_interval_ms;
+		}
+		if (event == peer_route_observation::event_t::closed)
+			observation.connection_duration_ms = total_milliseconds(aux::time_now() - m_connect);
+		m_ses.observe_peer_route(observation);
+	}
+
 	void peer_connection::second_tick(int const tick_interval_ms)
 	{
 		TORRENT_ASSERT(is_single_thread());
@@ -4909,6 +4941,9 @@ namespace libtorrent {
 		INVARIANT_CHECK;
 
 		std::shared_ptr<torrent> t = m_torrent.lock();
+
+		if (!m_disconnecting)
+			observe_route(peer_route_observation::event_t::activity, {}, operation_t::unknown, tick_interval_ms);
 
 		int warning = 0;
 		// drain the IP overhead from the bandwidth limiters
@@ -6437,6 +6472,7 @@ namespace libtorrent {
 		}
 
 		// this means the connection just succeeded
+		observe_route(peer_route_observation::event_t::connected);
 
 		received_synack(aux::is_v6(m_remote));
 

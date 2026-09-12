@@ -1005,6 +1005,7 @@ namespace libtorrent {
 		// and also let the piece picker know that we have this piece
 		// so it wont pick it for download
 		void piece_passed(piece_index_t index);
+		void observe_verified_routes(piece_index_t index);
 
 		// piece_failed is called when a piece fails the hash check
 		// for failures detected with v2 hashes the failing blocks(s)

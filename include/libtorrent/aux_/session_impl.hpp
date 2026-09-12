@@ -728,7 +728,8 @@ namespace aux {
 
 			proxy_settings proxy() const override;
 			peer_route select_peer_route(peer_route_request const&) const override;
-			void set_peer_route_selector(peer_route_selector selector);
+			void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer);
+			void observe_peer_route(peer_route_observation const&) const override;
 			void invalidate_peer_route(peer_route_context context);
 
 #ifndef TORRENT_DISABLE_DHT
@@ -997,6 +998,7 @@ namespace aux {
 			// peers.
 			connection_map m_connections;
 			peer_route_selector m_peer_route_selector;
+			peer_route_observer m_peer_route_observer;
 
 #ifdef TORRENT_SSL_PEERS
 			// this list holds incoming connections while they

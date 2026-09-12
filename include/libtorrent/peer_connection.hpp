@@ -872,8 +872,14 @@ namespace aux {
 		peer_route::type_t const m_route_type;
 		tcp::endpoint const m_route_local_endpoint;
 		std::uint32_t const m_native_interface_index;
+		std::shared_ptr<peer_route_origin const> const m_route_origin;
 		std::int64_t m_previous_download = 0;
 		std::int64_t m_previous_upload = 0;
+		std::int64_t m_route_observed_download = 0;
+		std::int64_t m_route_observed_upload = 0;
+		void observe_route(peer_route_observation::event_t event
+			, error_code const& error = {}, operation_t operation = operation_t::unknown
+			, int tick_interval_ms = 0);
 
 	public:
 		aux::chained_buffer m_send_buffer;

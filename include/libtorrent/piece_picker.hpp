@@ -43,6 +43,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/config.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <vector>
 #include <utility>
 #include <cstdint>
@@ -54,6 +55,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/assert.hpp"
 #include "libtorrent/time.hpp"
 #include "libtorrent/piece_block.hpp"
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/aux_/vector.hpp"
 #include "libtorrent/aux_/array.hpp"
 #include "libtorrent/span.hpp"
@@ -128,6 +130,9 @@ namespace libtorrent {
 			// the peer this block was requested or
 			// downloaded from.
 			torrent_peer* peer = nullptr;
+			// Only routed accepted blocks hold an origin. It outlives reconnects
+			// and follows the picker's normal failure/reset/flush lifecycle.
+			std::shared_ptr<peer_route_origin const> route;
 			// the number of peers that has this block in their
 			// download or request queues
 			unsigned num_peers:14;
@@ -377,7 +382,9 @@ namespace libtorrent {
 
 		// returns true if the block was marked as writing,
 		// and false if the block is already finished or writing
-		bool mark_as_writing(piece_block block, torrent_peer* peer);
+		bool mark_as_writing(piece_block block, torrent_peer* peer
+			, std::shared_ptr<peer_route_origin const> route = {});
+		std::vector<std::shared_ptr<peer_route_origin const>> take_block_routes(piece_index_t piece);
 
 		void started_hash_job(piece_index_t piece);
 		void completed_hash_job(piece_index_t piece);
