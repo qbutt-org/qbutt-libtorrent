@@ -895,6 +895,12 @@ namespace libtorrent {
 		sync_call(&torrent::get_peer_info, vp);
 	}
 
+	void torrent_handle::get_peer_diagnostic_info(std::vector<peer_diagnostic_info>& v) const
+	{
+		auto vp = &v;
+		sync_call(&torrent::get_peer_diagnostic_info, vp);
+	}
+
 	void torrent_handle::post_peer_info() const
 	{
 		async_call(&torrent::post_peer_info);

@@ -793,6 +793,7 @@ namespace libtorrent {
 #endif
 		void post_peer_info();
 		void get_peer_info(std::vector<peer_info>* v);
+		void get_peer_diagnostic_info(std::vector<peer_diagnostic_info>* v);
 		void get_download_queue(std::vector<partial_piece_info>* queue) const;
 		void post_download_queue();
 

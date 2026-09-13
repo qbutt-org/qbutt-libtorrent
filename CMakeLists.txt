@@ -88,6 +88,7 @@ set(libtorrent_include_files
 	peer_connection.hpp
 	peer_connection_handle.hpp
 	peer_connection_interface.hpp
+	peer_diagnostic_info.hpp
 	peer_id.hpp
 	peer_info.hpp
 	peer_route.hpp

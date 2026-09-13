@@ -66,6 +66,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/span.hpp"
 #include "libtorrent/piece_block.hpp"
 #include "libtorrent/peer_info.hpp"
+#include "libtorrent/peer_diagnostic_info.hpp"
 #include "libtorrent/aux_/vector.hpp"
 #include "libtorrent/disk_interface.hpp"
 #include "libtorrent/piece_picker.hpp" // for picker_options_t
@@ -468,6 +469,7 @@ namespace aux {
 		void update_interest();
 
 		void get_peer_info(peer_info& p) const override;
+		void get_peer_diagnostic_info(peer_diagnostic_info& p) const;
 
 		// returns the torrent this connection is a part of
 		// may be zero if the connection is an incoming connection

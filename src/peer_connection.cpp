@@ -4772,6 +4772,44 @@ namespace libtorrent {
 
 	}
 
+	void peer_connection::get_peer_diagnostic_info(peer_diagnostic_info& p) const
+	{
+		TORRENT_ASSERT(is_single_thread());
+		TORRENT_ASSERT(!associated_torrent().expired());
+
+		p.route = m_route;
+		auto const* const peer = peer_info_struct();
+		p.source = peer
+			? peer_source_flags_t(peer->source)
+			: peer_source_flags_t{};
+
+		auto const connection = type();
+		switch (connection)
+		{
+			case connection_type::bittorrent:
+				p.connection_type = peer_info::standard_bittorrent;
+				break;
+			case connection_type::url_seed:
+				p.connection_type = peer_info::web_seed;
+				break;
+			case connection_type::http_seed:
+				p.connection_type = peer_info::http_seed;
+				break;
+		}
+
+		p.flags = {};
+		if (is_interesting()) p.flags |= peer_info::interesting;
+		if (connection == connection_type::bittorrent && has_peer_choked())
+			p.flags |= peer_info::remote_choked;
+		if (is_connecting()) p.flags |= peer_info::connecting;
+		else if (in_handshake()) p.flags |= peer_info::handshake;
+
+		p.read_state = m_channel_state[download_channel];
+		p.pending_disk_bytes = m_outstanding_writing_bytes;
+		p.payload_down_speed = statistics().download_payload_rate();
+		p.down_speed = statistics().download_rate();
+	}
+
 #ifndef TORRENT_DISABLE_SUPERSEEDING
 	// TODO: 3 new_piece should be an optional<piece_index_t>. piece index -1
 	// should not be allowed

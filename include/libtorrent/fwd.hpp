@@ -231,6 +231,11 @@ struct peer_class_type_filter;
 struct peer_connection_handle;
 struct bt_peer_connection_handle;
 
+// include/libtorrent/peer_diagnostic_info.hpp
+TORRENT_VERSION_NAMESPACE_2
+struct peer_diagnostic_info;
+TORRENT_VERSION_NAMESPACE_2_END
+
 // include/libtorrent/peer_info.hpp
 TORRENT_VERSION_NAMESPACE_2
 struct peer_info;

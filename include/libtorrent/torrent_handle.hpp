@@ -65,6 +65,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/torrent_flags.hpp"
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/peer_info.hpp" // for peer_source_flags_t
+#include "libtorrent/peer_diagnostic_info.hpp"
 #include "libtorrent/download_priority.hpp"
 #include "libtorrent/pex_flags.hpp"
 #include "libtorrent/client_data.hpp"
@@ -335,6 +336,12 @@ namespace aux {
 		// peer_info.
 		void post_peer_info() const;
 		void get_peer_info(std::vector<peer_info>& v) const;
+
+		// Synchronously returns lightweight transfer diagnostics for connected
+		// peers. The result excludes endpoints, client identification and piece
+		// bitfields. If the torrent_handle is invalid, this function throws a
+		// system_error exception.
+		void get_peer_diagnostic_info(std::vector<peer_diagnostic_info>& v) const;
 
 		// calculates ``distributed_copies``, ``distributed_full_copies`` and
 		// ``distributed_fraction``.

@@ -7550,6 +7550,20 @@ namespace {
 		}
 	}
 
+	void torrent::get_peer_diagnostic_info(std::vector<peer_diagnostic_info>* v)
+	{
+		v->clear();
+		for (auto const peer : *this)
+		{
+			TORRENT_ASSERT(peer->m_in_use == 1337);
+
+			if (peer->associated_torrent().expired()) continue;
+
+			v->emplace_back();
+			peer->get_peer_diagnostic_info(v->back());
+		}
+	}
+
 	void torrent::post_peer_info()
 	{
 		std::vector<peer_info> v;

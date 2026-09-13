@@ -101,6 +101,7 @@
 #include "libtorrent/peer_connection.hpp"
 #include "libtorrent/peer_connection_handle.hpp"
 #include "libtorrent/peer_connection_interface.hpp"
+#include "libtorrent/peer_diagnostic_info.hpp"
 #include "libtorrent/peer_id.hpp"
 #include "libtorrent/peer_info.hpp"
 #include "libtorrent/peer_list.hpp"
