@@ -44,6 +44,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/session_interface.hpp"
 #include "libtorrent/aux_/session_udp_sockets.hpp"
 #include "libtorrent/udp_route.hpp"
+#include "libtorrent/trusted_inbound.hpp"
 #include "libtorrent/aux_/socket_type.hpp"
 #include "libtorrent/torrent_peer.hpp"
 #include "libtorrent/torrent_peer_allocator.hpp"
@@ -449,6 +450,8 @@ namespace aux {
 				, std::weak_ptr<tcp::acceptor>, transport);
 
 			void incoming_connection(socket_type);
+			void incoming_connection(socket_type, tcp::endpoint peer_endpoint
+				, peer_route_context context, peer_route::type_t route_type);
 
 			std::weak_ptr<torrent> find_torrent(info_hash_t const&) const override;
 #if TORRENT_ABI_VERSION == 1
@@ -748,6 +751,18 @@ namespace aux {
 			void observe_peer_route(peer_route_observation const&) const override;
 			void invalidate_peer_route(peer_route_context context);
 			error_code set_udp_routes(std::vector<udp_route> routes);
+			error_code set_trusted_inbound_routes(std::vector<trusted_inbound_route> routes);
+			error_code async_accept_trusted_inbound(peer_route_context context
+				, tcp::endpoint relay_endpoint, tcp::endpoint peer_endpoint
+				, trusted_inbound_token token);
+			struct trusted_inbound_attempt;
+			void on_trusted_inbound_connect(std::shared_ptr<trusted_inbound_attempt> const& attempt
+				, error_code const& ec);
+			void on_trusted_inbound_write(std::shared_ptr<trusted_inbound_attempt> const& attempt
+				, error_code const& ec);
+			void fail_trusted_inbound(std::shared_ptr<trusted_inbound_attempt> const& attempt
+				, error_code const& ec, operation_t operation);
+			void cancel_trusted_inbound(peer_route_context context);
 			void on_udp_route_state(std::weak_ptr<listen_socket_t> socket
 				, error_code const& ec, operation_t op);
 			void close_udp_route(std::shared_ptr<listen_socket_t> const& socket
@@ -1026,6 +1041,9 @@ namespace aux {
 			peer_route_selector m_peer_route_selector;
 			torrent_route_policy_selector m_torrent_route_policy_selector;
 			peer_route_observer m_peer_route_observer;
+			std::vector<trusted_inbound_route> m_trusted_inbound_routes;
+			std::vector<std::pair<std::uint64_t, std::uint64_t>> m_retired_trusted_inbound;
+			std::vector<std::shared_ptr<trusted_inbound_attempt>> m_trusted_inbound_attempts;
 
 #ifdef TORRENT_SSL_PEERS
 			// this list holds incoming connections while they

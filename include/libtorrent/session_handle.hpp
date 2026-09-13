@@ -50,6 +50,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/peer_route.hpp"
 #include "libtorrent/udp_route.hpp"
 #include "libtorrent/torrent_route_policy.hpp"
+#include "libtorrent/trusted_inbound.hpp"
 #include "libtorrent/io_context.hpp"
 #include "libtorrent/session_types.hpp"
 #include "libtorrent/portmap.hpp" // for portmap_protocol
@@ -135,6 +136,25 @@ namespace libtorrent {
 		// or permit unsolicited incoming uTP on these outgoing contexts.
 		error_code set_udp_routes(std::vector<udp_route> routes);
 		void invalidate_peer_route(peer_route_context context);
+
+		// Atomically replace up to 64 verified inbound route descriptors. Public
+		// endpoints identify listeners for validation and self-connection checks; this
+		// API does not announce or contact them. Relays must be numeric loopback
+		// endpoints. A descriptor is immutable for its generation. Removing any
+		// descriptor retires that path generation for future registrations and closes
+		// pending and active trusted inbound connections before return. Unchanged
+		// sibling family descriptors may remain registered.
+		error_code set_trusted_inbound_routes(std::vector<trusted_inbound_route> routes);
+
+		// Start one bounded connection to an already registered loopback relay.
+		// Before any BitTorrent bytes, libtorrent writes the fixed prelude
+		// "QBIN", version 1 and the 32 raw token bytes. The peer endpoint is the
+		// original numeric remote endpoint used by filtering, limits, deduplication
+		// and alerts. The immutable route context controls torrent admission. There
+		// is no DNS or direct fallback.
+		error_code async_accept_trusted_inbound(peer_route_context context
+			, tcp::endpoint relay_endpoint, tcp::endpoint peer_endpoint
+			, trusted_inbound_token token);
 
 		// saves settings (i.e. the settings_pack)
 		static constexpr save_state_flags_t save_settings = 0_bit;

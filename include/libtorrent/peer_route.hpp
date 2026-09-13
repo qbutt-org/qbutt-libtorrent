@@ -31,7 +31,7 @@ enum class route_family { ipv4, ipv6 };
 
 struct route_descriptor
 {
-	enum class type_t { session_default, native, socks5, blocked };
+	enum class type_t { session_default, native, socks5, trusted_inbound, blocked };
 	type_t type = type_t::session_default;
 	peer_route_context context;
 

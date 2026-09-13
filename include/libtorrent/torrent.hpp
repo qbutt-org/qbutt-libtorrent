@@ -387,6 +387,7 @@ namespace libtorrent {
 		torrent_route_policy const& route_policy() const { return m_route_policy; }
 		bool managed_routes() const;
 		bool allows_route(peer_route_context context, route_family family) const;
+		bool allows_peer_route(peer_connection const& peer) const;
 		bool allows_discovery_socket(aux::listen_socket_handle const& socket) const;
 		bool allows_peer_source(peer_source_flags_t source) const;
 		bool apply_route_policy(torrent_route_policy policy);

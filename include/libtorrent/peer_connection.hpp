@@ -496,6 +496,7 @@ namespace aux {
 		aux::socket_type& get_socket() { return m_socket; }
 		tcp::endpoint const& remote() const override { return m_remote; }
 		peer_route_context route_context() const { return m_route; }
+		peer_route::type_t route_type() const { return m_route_type; }
 		bool has_peer_route() const { return m_route_type != peer_route::type_t::session_default; }
 		tcp::endpoint local_endpoint() const override { return m_local; }
 

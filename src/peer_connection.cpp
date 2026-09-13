@@ -334,11 +334,14 @@ namespace libtorrent {
 				disconnect(ec, operation_t::iocontrol);
 				return;
 			}
-			m_remote = m_socket.remote_endpoint(ec);
-			if (ec)
+			if (m_route_type != peer_route::type_t::trusted_inbound)
 			{
-				disconnect(ec, operation_t::getpeername);
-				return;
+				m_remote = m_socket.remote_endpoint(ec);
+				if (ec)
+				{
+					disconnect(ec, operation_t::getpeername);
+					return;
+				}
 			}
 			m_local = m_socket.local_endpoint(ec);
 			if (ec)
@@ -1415,6 +1418,7 @@ namespace libtorrent {
 		// of the torrent and peer_connection::disconnect() will fail if it
 		// think it is
 		m_torrent = t;
+		if (!m_outgoing) observe_route(peer_route_observation::event_t::connected);
 
 		if (t && t->alerts().should_post<peer_connect_alert>())
 		{

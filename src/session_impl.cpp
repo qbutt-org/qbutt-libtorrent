@@ -209,6 +209,33 @@ namespace aux {
 	constexpr ip_source_t session_interface::source_tracker;
 	constexpr ip_source_t session_interface::source_router;
 
+	struct session_impl::trusted_inbound_attempt
+	{
+		trusted_inbound_attempt(io_context& ios, peer_route_context const route_context
+			, tcp::endpoint const relay, tcp::endpoint const peer
+			, trusted_inbound_token const& token)
+			: context(route_context)
+			, relay_endpoint(relay)
+			, peer_endpoint(peer)
+			, socket(ios)
+			, timer(ios)
+		{
+			prelude[0] = 'Q';
+			prelude[1] = 'B';
+			prelude[2] = 'I';
+			prelude[3] = 'N';
+			prelude[4] = 1;
+			std::copy(token.begin(), token.end(), prelude.begin() + 5);
+		}
+
+		peer_route_context const context;
+		tcp::endpoint const relay_endpoint;
+		tcp::endpoint const peer_endpoint;
+		true_tcp_socket socket;
+		deadline_timer timer;
+		std::array<unsigned char, 37> prelude{};
+	};
+
 void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 {
 	bdecode_node val;
@@ -1159,9 +1186,248 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 #endif
 	}
 
+	namespace {
+		bool same_trusted_inbound_identity(trusted_inbound_route const& lhs
+			, trusted_inbound_route const& rhs)
+		{
+			return lhs.context == rhs.context && lhs.family == rhs.family;
+		}
+	}
+
+	error_code session_impl::set_trusted_inbound_routes(std::vector<trusted_inbound_route> routes)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (m_abort) return boost::asio::error::operation_aborted;
+		if (routes.size() > 64) return boost::asio::error::invalid_argument;
+
+		std::vector<std::uint64_t> known_paths;
+		for (auto const& retired : m_retired_trusted_inbound)
+			known_paths.push_back(retired.first);
+		for (auto const& current : m_trusted_inbound_routes)
+			if (std::find(known_paths.begin(), known_paths.end(), current.context.path_id)
+				== known_paths.end()) known_paths.push_back(current.context.path_id);
+
+		for (auto i = routes.begin(); i != routes.end(); ++i)
+		{
+			bool const ipv4 = i->family == route_family::ipv4;
+			if (i->context.path_id == 0 || i->context.generation == 0
+				|| (i->family != route_family::ipv4 && i->family != route_family::ipv6)
+				|| i->public_endpoint.port() == 0 || !is_global(i->public_endpoint.address())
+				|| i->public_endpoint.address().is_v4() != ipv4
+				|| i->relay_endpoint.port() == 0 || !i->relay_endpoint.address().is_loopback())
+				return boost::asio::error::invalid_argument;
+
+			for (auto j = routes.begin(); j != i; ++j)
+			{
+				if (same_trusted_inbound_identity(*i, *j)
+					|| (i->context.path_id == j->context.path_id
+						&& i->context.generation != j->context.generation))
+					return boost::asio::error::invalid_argument;
+			}
+
+			auto const old = std::find_if(m_trusted_inbound_routes.begin()
+				, m_trusted_inbound_routes.end(), [&](trusted_inbound_route const& r)
+				{ return same_trusted_inbound_identity(*i, r); });
+			if (old != m_trusted_inbound_routes.end())
+			{
+				if (*old != *i) return boost::asio::error::invalid_argument;
+				continue;
+			}
+			for (auto const& current : m_trusted_inbound_routes)
+				if (current.context.path_id == i->context.path_id
+					&& i->context.generation <= current.context.generation)
+					return boost::asio::error::invalid_argument;
+
+			auto const retired = std::find_if(m_retired_trusted_inbound.begin()
+				, m_retired_trusted_inbound.end(), [&](auto const& r)
+				{ return r.first == i->context.path_id; });
+			if (retired != m_retired_trusted_inbound.end()
+				&& i->context.generation <= retired->second)
+				return boost::asio::error::invalid_argument;
+
+			if (std::find(known_paths.begin(), known_paths.end(), i->context.path_id)
+				== known_paths.end())
+			{
+				if (known_paths.size() == 64) return boost::asio::error::no_buffer_space;
+				known_paths.push_back(i->context.path_id);
+			}
+		}
+
+		auto const previous = std::move(m_trusted_inbound_routes);
+		m_trusted_inbound_routes = std::move(routes);
+		for (auto const& old : previous)
+		{
+			if (std::any_of(m_trusted_inbound_routes.begin(), m_trusted_inbound_routes.end()
+				, [&](trusted_inbound_route const& r)
+				{ return same_trusted_inbound_identity(old, r); })) continue;
+			cancel_trusted_inbound(old.context);
+			auto retired = std::find_if(m_retired_trusted_inbound.begin()
+				, m_retired_trusted_inbound.end(), [&](auto const& r)
+				{ return r.first == old.context.path_id; });
+			if (retired == m_retired_trusted_inbound.end())
+				m_retired_trusted_inbound.emplace_back(old.context.path_id, old.context.generation);
+			else retired->second = std::max(retired->second, old.context.generation);
+		}
+		return {};
+	}
+
+	error_code session_impl::async_accept_trusted_inbound(peer_route_context const context
+		, tcp::endpoint const relay_endpoint, tcp::endpoint const peer_endpoint
+		, trusted_inbound_token const token)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (m_abort) return boost::asio::error::operation_aborted;
+		if (peer_endpoint.port() == 0 || peer_endpoint.address().is_unspecified()
+			|| peer_endpoint.address().is_multicast() || !relay_endpoint.address().is_loopback()
+			|| relay_endpoint.port() == 0)
+			return boost::asio::error::invalid_argument;
+		auto const route = std::find_if(m_trusted_inbound_routes.begin()
+			, m_trusted_inbound_routes.end(), [&](trusted_inbound_route const& r)
+			{
+				return r.context == context && r.relay_endpoint == relay_endpoint
+					&& r.enable_tcp;
+			});
+		if (route == m_trusted_inbound_routes.end())
+			return boost::asio::error::access_denied;
+		if (std::any_of(m_trusted_inbound_routes.begin(), m_trusted_inbound_routes.end()
+			, [&](trusted_inbound_route const& r)
+			{ return r.context == context && r.public_endpoint == peer_endpoint; }))
+			return errors::self_connection;
+		if (std::all_of(token.begin(), token.end(), [](unsigned char const c) { return c == 0; }))
+			return boost::asio::error::invalid_argument;
+		if (m_trusted_inbound_attempts.size() == 64)
+			return boost::asio::error::no_buffer_space;
+		for (auto const& pending : m_trusted_inbound_attempts)
+			if (std::equal(token.begin(), token.end(), pending->prelude.begin() + 5))
+				return boost::asio::error::already_started;
+
+		auto attempt = std::make_shared<trusted_inbound_attempt>(m_io_context
+			, context, relay_endpoint, peer_endpoint, token);
+		error_code ec;
+		attempt->socket.open(relay_endpoint.protocol(), ec);
+		if (ec) return ec;
+		m_trusted_inbound_attempts.push_back(attempt);
+		attempt->timer.expires_after(seconds(10));
+		auto self = shared_from_this();
+		attempt->timer.async_wait([self, attempt](error_code const& e)
+		{
+			if (!e) self->fail_trusted_inbound(attempt, boost::asio::error::timed_out
+				, operation_t::connect);
+		});
+		attempt->socket.async_connect(relay_endpoint, [self, attempt](error_code const& e)
+		{ self->on_trusted_inbound_connect(attempt, e); });
+		return {};
+	}
+
+	void session_impl::on_trusted_inbound_connect(
+		std::shared_ptr<trusted_inbound_attempt> const& attempt, error_code const& ec)
+	{
+		if (ec) { fail_trusted_inbound(attempt, ec, operation_t::connect); return; }
+		if (std::find(m_trusted_inbound_attempts.begin(), m_trusted_inbound_attempts.end(), attempt)
+			== m_trusted_inbound_attempts.end()) return;
+		auto const route = std::find_if(m_trusted_inbound_routes.begin()
+			, m_trusted_inbound_routes.end(), [&](trusted_inbound_route const& r)
+			{
+				return r.context == attempt->context
+					&& r.relay_endpoint == attempt->relay_endpoint && r.enable_tcp;
+			});
+		if (route == m_trusted_inbound_routes.end())
+		{
+			fail_trusted_inbound(attempt, boost::asio::error::operation_aborted
+				, operation_t::connect);
+			return;
+		}
+		auto self = shared_from_this();
+		async_write(attempt->socket, boost::asio::buffer(attempt->prelude)
+			, [self, attempt](error_code const& e, std::size_t)
+			{ self->on_trusted_inbound_write(attempt, e); });
+	}
+
+	void session_impl::on_trusted_inbound_write(
+		std::shared_ptr<trusted_inbound_attempt> const& attempt, error_code const& ec)
+	{
+		if (ec) { fail_trusted_inbound(attempt, ec, operation_t::sock_write); return; }
+		auto const pending = std::find(m_trusted_inbound_attempts.begin()
+			, m_trusted_inbound_attempts.end(), attempt);
+		if (pending == m_trusted_inbound_attempts.end()) return;
+		auto const route = std::find_if(m_trusted_inbound_routes.begin()
+			, m_trusted_inbound_routes.end(), [&](trusted_inbound_route const& r)
+			{
+				return r.context == attempt->context
+					&& r.relay_endpoint == attempt->relay_endpoint && r.enable_tcp;
+			});
+		if (route == m_trusted_inbound_routes.end())
+		{
+			fail_trusted_inbound(attempt, boost::asio::error::operation_aborted
+				, operation_t::connect);
+			return;
+		}
+		attempt->timer.cancel();
+		m_trusted_inbound_attempts.erase(pending);
+		std::fill(attempt->prelude.begin(), attempt->prelude.end(), 0);
+		socket_type socket(tcp::socket(std::move(attempt->socket)));
+		incoming_connection(std::move(socket), attempt->peer_endpoint
+			, attempt->context, peer_route::type_t::trusted_inbound);
+	}
+
+	void session_impl::fail_trusted_inbound(
+		std::shared_ptr<trusted_inbound_attempt> const& attempt, error_code const& ec
+		, operation_t const operation)
+	{
+		auto const pending = std::find(m_trusted_inbound_attempts.begin()
+			, m_trusted_inbound_attempts.end(), attempt);
+		if (pending == m_trusted_inbound_attempts.end()) return;
+		m_trusted_inbound_attempts.erase(pending);
+		attempt->timer.cancel();
+		error_code ignored;
+		attempt->socket.close(ignored);
+		std::fill(attempt->prelude.begin(), attempt->prelude.end(), 0);
+		if (m_alerts.should_post<peer_route_alert>())
+			m_alerts.emplace_alert<peer_route_alert>(torrent_handle(), attempt->peer_endpoint
+				, peer_id{}, attempt->context, operation, ec, 0, 0);
+	}
+
+	void session_impl::cancel_trusted_inbound(peer_route_context const context)
+	{
+		auto attempts = m_trusted_inbound_attempts;
+		for (auto const& attempt : attempts)
+			if (attempt->context == context)
+				fail_trusted_inbound(attempt, boost::asio::error::operation_aborted
+					, operation_t::connect);
+		for (auto i = m_connections.begin(); i != m_connections.end();)
+		{
+			auto const connection = *i++;
+			if (connection->route_type() != peer_route::type_t::trusted_inbound
+				|| connection->route_context() != context)
+				continue;
+			connection->disconnect(boost::asio::error::operation_aborted
+				, operation_t::connect, peer_connection_interface::normal);
+			error_code ignored;
+			connection->get_socket().close(ignored);
+		}
+	}
+
 	void session_impl::invalidate_peer_route(peer_route_context const context)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		bool registered = false;
+		m_trusted_inbound_routes.erase(std::remove_if(m_trusted_inbound_routes.begin()
+			, m_trusted_inbound_routes.end(), [&](trusted_inbound_route const& r)
+			{
+				if (r.context != context) return false;
+				registered = true;
+				return true;
+			}), m_trusted_inbound_routes.end());
+		if (registered)
+		{
+			auto retired = std::find_if(m_retired_trusted_inbound.begin()
+				, m_retired_trusted_inbound.end(), [&](auto const& r)
+				{ return r.first == context.path_id; });
+			if (retired == m_retired_trusted_inbound.end())
+				m_retired_trusted_inbound.emplace_back(context.path_id, context.generation);
+			else retired->second = std::max(retired->second, context.generation);
+		}
+		cancel_trusted_inbound(context);
 		for (auto const& t : m_torrents) t->invalidate_route(context);
 		cancel_route_operations();
 		for (auto i = m_connections.begin(); i != m_connections.end();)
@@ -1479,6 +1745,10 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		// abort the main thread
 		m_abort = true;
 		error_code ec;
+		auto const inbound_attempts = m_trusted_inbound_attempts;
+		for (auto const& attempt : inbound_attempts)
+			fail_trusted_inbound(attempt, boost::asio::error::operation_aborted
+				, operation_t::connect);
 
 		// we rely on on_tick() during shutdown, but we don't need to wait a
 		// whole second for it to fire
@@ -3403,7 +3673,31 @@ namespace {
 
 	void session_impl::incoming_connection(socket_type s)
 	{
+		error_code ec;
+		tcp::endpoint const endp = s.remote_endpoint(ec);
+		if (ec)
+		{
+#ifndef TORRENT_DISABLE_LOGGING
+			if (should_log())
+			{
+				session_log(" <== INCOMING CONNECTION [ rejected, could "
+					"not retrieve remote endpoint: %s ]", print_error(ec).c_str());
+			}
+#endif
+			return;
+		}
+		incoming_connection(std::move(s), endp, {}, peer_route::type_t::session_default);
+	}
+
+	void session_impl::incoming_connection(socket_type s, tcp::endpoint const endp
+		, peer_route_context const context, peer_route::type_t const route_type)
+	{
 		TORRENT_ASSERT(is_single_thread());
+		TORRENT_ASSERT((route_type == peer_route::type_t::session_default)
+			== (context == peer_route_context{}));
+		TORRENT_ASSERT(route_type == peer_route::type_t::session_default
+			|| route_type == peer_route::type_t::trusted_inbound);
+		bool const trusted_inbound = route_type == peer_route::type_t::trusted_inbound;
 
 		if (m_abort)
 		{
@@ -3422,21 +3716,6 @@ namespace {
 		}
 
 		error_code ec;
-		// we got a connection request!
-		tcp::endpoint endp = s.remote_endpoint(ec);
-
-		if (ec)
-		{
-#ifndef TORRENT_DISABLE_LOGGING
-			if (should_log())
-			{
-				session_log(" <== INCOMING CONNECTION [ rejected, could "
-					"not retrieve remote endpoint: %s ]"
-					, print_error(ec).c_str());
-			}
-#endif
-			return;
-		}
 
 		if (!m_settings.get_bool(settings_pack::enable_incoming_utp)
 			&& is_utp(s))
@@ -3464,7 +3743,7 @@ namespace {
 
 		// if there are outgoing interfaces specified, verify this
 		// peer is correctly bound to one of them
-		if (!m_outgoing_interfaces.empty())
+		if (!trusted_inbound && !m_outgoing_interfaces.empty())
 		{
 			tcp::endpoint local = s.local_endpoint(ec);
 			if (ec)
@@ -3638,6 +3917,9 @@ namespace {
 			, nullptr
 			, aux::generate_peer_id(m_settings)
 		};
+		pack.route = context;
+		pack.route_type = route_type;
+		pack.route_transport = peer_route::transport_t::tcp;
 
 		std::shared_ptr<peer_connection> c
 			= std::make_shared<bt_peer_connection>(pack);

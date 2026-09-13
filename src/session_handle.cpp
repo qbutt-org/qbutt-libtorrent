@@ -113,6 +113,18 @@ namespace libtorrent {
 		sync_call(&session_impl::invalidate_peer_route, context);
 	}
 
+	error_code session_handle::set_trusted_inbound_routes(std::vector<trusted_inbound_route> routes)
+	{
+		return sync_call_ret<error_code>(&session_impl::set_trusted_inbound_routes, std::move(routes));
+	}
+
+	error_code session_handle::async_accept_trusted_inbound(peer_route_context context
+		, tcp::endpoint relay_endpoint, tcp::endpoint peer_endpoint, trusted_inbound_token token)
+	{
+		return sync_call_ret<error_code>(&session_impl::async_accept_trusted_inbound
+			, context, relay_endpoint, peer_endpoint, token);
+	}
+
 	template <typename Fun, typename... Args>
 	void session_handle::async_call(Fun f, Args&&... a) const
 	{

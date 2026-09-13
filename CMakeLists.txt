@@ -92,6 +92,7 @@ set(libtorrent_include_files
 	peer_info.hpp
 	peer_route.hpp
 	torrent_route_policy.hpp
+	trusted_inbound.hpp
 	udp_route.hpp
 	peer_list.hpp
 	peer_request.hpp

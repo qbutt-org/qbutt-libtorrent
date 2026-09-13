@@ -551,6 +551,15 @@ bool is_downloading_state(int const st)
 			, [&](network_route const& r) { return r.binding.context == context && r.family == family; });
 	}
 
+	bool torrent::allows_peer_route(peer_connection const& peer) const
+	{
+		if (peer.route_type() == peer_route::type_t::trusted_inbound)
+			return allows_route(peer.route_context(), route_family::ipv4)
+				|| allows_route(peer.route_context(), route_family::ipv6);
+		return allows_route(peer.route_context(), peer.remote().address().is_v4()
+			? route_family::ipv4 : route_family::ipv6);
+	}
+
 	bool torrent::allows_discovery_socket(aux::listen_socket_handle const& socket) const
 	{
 		if (!socket) return false;
@@ -614,8 +623,7 @@ bool is_downloading_state(int const st)
 		{
 			auto const p = *i++;
 			auto const peer = p->peer_info_struct();
-			if (allows_route(p->route_context(), p->remote().address().is_v4()
-				? route_family::ipv4 : route_family::ipv6)
+			if (allows_peer_route(*p)
 				&& (!peer || allows_peer_source(peer->peer_source()))) continue;
 			p->disconnect(boost::asio::error::operation_aborted
 				, operation_t::connect, peer_connection_interface::normal);
@@ -8191,8 +8199,7 @@ namespace {
 
 	bool torrent::attach_peer(peer_connection* p) try
 	{
-		if (managed_routes() && !allows_route(p->route_context()
-			, p->remote().address().is_v4() ? route_family::ipv4 : route_family::ipv6))
+		if (!allows_peer_route(*p))
 		{
 			p->disconnect(boost::asio::error::access_denied, operation_t::connect);
 			return false;
@@ -8357,7 +8364,8 @@ namespace {
 
 #if TORRENT_USE_ASSERTS
 		error_code ec;
-		TORRENT_ASSERT(p->remote() == p->get_socket().remote_endpoint(ec) || ec);
+		TORRENT_ASSERT(p->route_type() == peer_route::type_t::trusted_inbound
+			|| p->remote() == p->get_socket().remote_endpoint(ec) || ec);
 #endif
 
 		TORRENT_ASSERT(p->peer_info_struct() != nullptr);
