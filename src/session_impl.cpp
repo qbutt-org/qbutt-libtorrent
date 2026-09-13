@@ -3308,6 +3308,10 @@ namespace {
 		if (!s) return;
 		auto owner = ls.lock();
 		if (!owner || (owner->route && owner->route_state != udp_route_state::ready)) return;
+#ifndef TORRENT_DISABLE_DHT
+		bool const receive_dht = !owner->route || owner->route->enable_dht;
+#endif
+		bool const receive_trackers = !owner->route || owner->route->enable_trackers;
 
 		struct utp_socket_manager& mgr =
 #ifdef TORRENT_SSL_PEERS
@@ -3329,11 +3333,12 @@ namespace {
 					// handle ICMP errors too
 
 #ifndef TORRENT_DISABLE_DHT
-					if (m_dht)
+					if (m_dht && receive_dht)
 						m_dht->incoming_error(owner, packet.error, packet.from);
 #endif
 
-					m_tracker_manager.incoming_error(owner, packet.error, packet.from);
+					if (receive_trackers)
+						m_tracker_manager.incoming_error(owner, packet.error, packet.from);
 					continue;
 				}
 
@@ -3345,7 +3350,8 @@ namespace {
 					// only the tracker manager supports receiving UDP packets
 					// from hostnames. If it won't handle it, no one else will
 					// either
-					m_tracker_manager.incoming_packet(owner, packet.hostname, packet.from.port(), buf);
+					if (receive_trackers)
+						m_tracker_manager.incoming_packet(owner, packet.hostname, packet.from.port(), buf);
 					continue;
 				}
 
@@ -3357,17 +3363,15 @@ namespace {
 					// socket
 					bool handled = false;
 #ifndef TORRENT_DISABLE_DHT
-					auto listen_socket = ls.lock();
-					if (m_dht && buf.size() > 20
+					if (m_dht && receive_dht && buf.size() > 20
 						&& buf.front() == 'd'
-						&& buf.back() == 'e'
-						&& listen_socket)
+						&& buf.back() == 'e')
 					{
-						handled = m_dht->incoming_packet(listen_socket, packet.from, buf);
+						handled = m_dht->incoming_packet(owner, packet.from, buf);
 					}
 #endif
 
-					if (!handled)
+					if (!handled && receive_trackers)
 					{
 						m_tracker_manager.incoming_packet(owner, packet.from, buf);
 					}
