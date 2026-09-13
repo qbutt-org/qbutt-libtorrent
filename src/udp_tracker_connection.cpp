@@ -721,7 +721,13 @@ namespace libtorrent {
 		// ip address
 		address_v4 announce_ip;
 
-		if (bind_socket().route_context().path_id == 0
+		if (bind_socket().route_context().path_id != 0
+			&& !settings.get_bool(settings_pack::anonymous_mode)
+			&& req.ipv4.size() == 1)
+		{
+			announce_ip = req.ipv4.front();
+		}
+		else if (bind_socket().route_context().path_id == 0
 			&& !settings.get_bool(settings_pack::anonymous_mode)
 			&& !settings.get_str(settings_pack::announce_ip).empty())
 		{

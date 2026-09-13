@@ -21,15 +21,19 @@ struct udp_route
 	family_t family = family_t::ipv4;
 	bool ssl = false;
 	bool enable_utp = true;
-	// DHT routing and peer lookup only. These outgoing contexts do not
-	// publish an announce_peer endpoint or accept unsolicited peer connections.
+	// DHT routing and peer lookup. A route publishes announce_peer only when it
+	// also has a verified UDP public_endpoint.
 	bool enable_dht = false;
 	bool enable_trackers = false;
 
-	// An externally verified address, never inferred from the loopback relay.
-	// DHT requires a public address of the logical family. Unspecified means
-	// unknown. This descriptor does not establish public inbound capability.
+	// The remote UDP egress address verified by the application. DHT requires it
+	// for its node identity. An unspecified address means the egress is unknown.
 	address external_address;
+
+	// A UDP peer listener verified by the application. Its address may match
+	// external_address, but it is independent of the route's generic TCP/UDP
+	// tracker endpoint. An unspecified address and zero port mean outgoing-only.
+	tcp::endpoint public_endpoint;
 };
 
 }

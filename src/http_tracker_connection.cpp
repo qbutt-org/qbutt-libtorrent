@@ -185,7 +185,9 @@ namespace libtorrent {
 			}
 			else
 #endif
-			if (!settings.get_bool(settings_pack::anonymous_mode))
+			if (!settings.get_bool(settings_pack::anonymous_mode)
+				&& (!tracker_req().route_operation
+					|| tracker_req().route_operation->route.binding.context.path_id == 0))
 			{
 				std::string const& announce_ip = settings.get_str(settings_pack::announce_ip);
 				if (!announce_ip.empty())

@@ -16,8 +16,12 @@ struct network_route
 {
 	route_descriptor binding;
 	route_family family = route_family::ipv4;
+	// A public listener verified by the application. The engine validates its
+	// shape and family; the application owns reachability evidence. An
+	// unspecified address and zero port describe an outgoing-only route.
+	tcp::endpoint public_endpoint;
 	bool operator==(network_route const& rhs) const
-	{ return binding == rhs.binding && family == rhs.family; }
+	{ return binding == rhs.binding && family == rhs.family && public_endpoint == rhs.public_endpoint; }
 };
 
 struct torrent_route_request

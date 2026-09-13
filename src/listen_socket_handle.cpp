@@ -44,6 +44,14 @@ namespace libtorrent { namespace aux {
 		return s->route ? s->route->external_address : s->external_address.external_address();
 	}
 
+	tcp::endpoint listen_socket_handle::get_public_endpoint() const
+	{
+		auto s = m_sock.lock();
+		TORRENT_ASSERT(s);
+		if (!s) throw_ex<std::bad_weak_ptr>();
+		return s->route ? s->route->public_endpoint : tcp::endpoint{};
+	}
+
 	tcp::endpoint listen_socket_handle::get_local_endpoint() const
 	{
 		auto s = m_sock.lock();

@@ -451,12 +451,19 @@ void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_
 	, std::function<void(std::vector<tcp::endpoint> const&)> f
 	, std::shared_ptr<aux::network_operation> operation)
 {
-	// Managed UDP contexts currently support outgoing peers only. Retrieve
-	// peers without publishing the relay's source port as an incoming listener.
+	// Never infer a public listener from a managed route's loopback relay.
+	// Outgoing-only routes may retrieve peers but must not announce themselves.
+	auto effective_flags = flags;
 	if (m_sock.route_context().path_id != 0)
 	{
-		get_peers(info_hash, std::move(f), {}, flags, std::move(operation));
-		return;
+		auto const endpoint = m_sock.get_public_endpoint();
+		if (endpoint.address().is_unspecified() || endpoint.port() == 0)
+		{
+			get_peers(info_hash, std::move(f), {}, flags, std::move(operation));
+			return;
+		}
+		listen_port = endpoint.port();
+		effective_flags &= ~announce::implied_port;
 	}
 #ifndef TORRENT_DISABLE_LOGGING
 	if (m_observer != nullptr && m_observer->should_log(dht_logger::node))
@@ -469,13 +476,13 @@ void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_
 	if (listen_port == 0 && m_observer != nullptr)
 	{
 		listen_port = m_observer->get_listen_port(
-			(flags & announce::ssl_torrent) ? aux::transport::ssl : aux::transport::plaintext
+			(effective_flags & announce::ssl_torrent) ? aux::transport::ssl : aux::transport::plaintext
 			, m_sock);
 	}
 
 	get_peers(info_hash, std::move(f)
 		, std::bind(&announce_fun, _1, std::ref(*this)
-		, listen_port, info_hash, flags), flags, std::move(operation));
+		, listen_port, info_hash, effective_flags), effective_flags, std::move(operation));
 }
 
 void node::abort_route_operations()

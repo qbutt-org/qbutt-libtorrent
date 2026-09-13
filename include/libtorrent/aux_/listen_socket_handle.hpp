@@ -62,6 +62,7 @@ namespace libtorrent { namespace aux {
 		explicit operator bool() const { return !m_sock.expired(); }
 
 		address get_external_address() const;
+		tcp::endpoint get_public_endpoint() const;
 		tcp::endpoint get_local_endpoint() const;
 		udp::endpoint get_udp_endpoint() const;
 		bool can_route(address const&) const;

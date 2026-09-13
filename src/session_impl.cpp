@@ -998,6 +998,16 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		m_peer_route_observer = std::move(observer);
 	}
 
+	namespace {
+		bool valid_advertised_endpoint(tcp::endpoint const& endpoint, bool const ipv4)
+		{
+			bool const unspecified = endpoint.address().is_unspecified();
+			return unspecified ? endpoint.port() == 0
+				: endpoint.port() != 0 && is_global(endpoint.address())
+					&& endpoint.address().is_v4() == ipv4;
+		}
+	}
+
 	error_code session_impl::validate_torrent_route_policy(torrent_route_policy const& policy) const
 	{
 		if (policy.mode == torrent_route_policy::mode_t::session_default)
@@ -1010,7 +1020,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			auto const& r = i->binding;
 			bool const ipv4 = i->family == route_family::ipv4;
 			if (r.context.path_id == 0 || r.context.generation == 0
-				|| (i->family != route_family::ipv4 && i->family != route_family::ipv6))
+				|| (i->family != route_family::ipv4 && i->family != route_family::ipv6)
+				|| !valid_advertised_endpoint(i->public_endpoint, ipv4))
 				return boost::asio::error::invalid_argument;
 			if (r.type == route_descriptor::type_t::socks5)
 			{
@@ -1032,11 +1043,12 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 					return boost::asio::error::invalid_argument;
 			for (auto const& s : m_listen_sockets)
 				if (s->route && s->route->route.context == r.context
-					&& s->route->family == i->family && s->route->route != r)
+					&& s->route->family == i->family
+					&& s->route->route != r)
 					return boost::asio::error::invalid_argument;
 			for (auto const& t : m_torrents)
 				for (auto const& old : t->route_policy().routes)
-					if (old.binding.context == r.context && old.family == i->family && old.binding != r)
+					if (old.binding.context == r.context && old.family == i->family && !(old == *i))
 						return boost::asio::error::invalid_argument;
 		}
 		return {};
@@ -1077,7 +1089,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				for (auto const& p : policies)
 					for (auto const& a : p.second.routes)
 						for (auto const& b : policy.routes)
-							if (a.binding.context == b.binding.context && a.family == b.family && a.binding != b.binding)
+							if (a.binding.context == b.binding.context && a.family == b.family && !(a == b))
 								return boost::asio::error::invalid_argument;
 				policies.emplace_back(t, std::move(policy));
 			}
@@ -1191,6 +1203,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				&& lhs.route.local_endpoint == rhs.route.local_endpoint
 				&& lhs.route.native_interface_index == rhs.route.native_interface_index
 				&& lhs.external_address == rhs.external_address
+				&& lhs.public_endpoint == rhs.public_endpoint
 				&& lhs.enable_utp == rhs.enable_utp && lhs.enable_dht == rhs.enable_dht
 				&& lhs.enable_trackers == rhs.enable_trackers;
 		}
@@ -1212,6 +1225,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				|| (i->ssl && (i->enable_dht || i->enable_trackers))
 				|| (!i->external_address.is_unspecified()
 					&& (!is_global(i->external_address) || i->external_address.is_v4() != ipv4))
+				|| !valid_advertised_endpoint(i->public_endpoint, ipv4)
 				|| (i->enable_dht && i->external_address.is_unspecified()))
 				return boost::asio::error::invalid_argument;
 			if (socks)
@@ -1237,6 +1251,11 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				if (s->route && same_udp_identity(*i, *s->route)
 					&& !same_udp_descriptor(*i, *s->route))
 					return boost::asio::error::invalid_argument;
+			for (auto const& t : m_torrents)
+				for (auto const& route : t->route_policy().routes)
+					if (route.binding.context == r.context && route.family == i->family
+						&& route.binding != r)
+						return boost::asio::error::invalid_argument;
 		}
 
 		// Validation above is atomic. Unchanged descriptors retain their sockets,
@@ -1280,7 +1299,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			if (ec) { on_udp_route_state(s, ec, operation_t::sock_bind); continue; }
 			if (!socks) s->local_endpoint = {physical.address(), std::uint16_t(s->udp_sock->sock.local_port())};
 			if (!s->route->external_address.is_unspecified())
-				s->external_address.cast_vote(s->route->external_address, source_router, s->route->external_address);
+				s->external_address.cast_vote(s->route->external_address, source_router
+					, s->route->external_address);
 			set_socket_buffer_size(s->udp_sock->sock, m_settings, ec);
 			if (socks)
 			{
@@ -1696,7 +1716,21 @@ namespace {
 #endif
 			req.ssl_ctx = &m_ssl_ctx;
 #endif
-		if (const auto announce_port = std::uint16_t(m_settings.get_int(settings_pack::announce_port)))
+		if (req.route_operation
+			&& req.route_operation->route.binding.context.path_id != 0)
+		{
+			auto const endpoint = req.route_operation->route.public_endpoint;
+			req.listen_port = make_announce_port(endpoint.port());
+			req.ipv4.clear();
+			req.ipv6.clear();
+			if (!m_settings.get_bool(settings_pack::anonymous_mode)
+				&& !endpoint.address().is_unspecified())
+			{
+				if (endpoint.address().is_v4()) req.ipv4.push_back(endpoint.address().to_v4());
+				else req.ipv6.push_back(endpoint.address().to_v6());
+			}
+		}
+		else if (const auto announce_port = std::uint16_t(m_settings.get_int(settings_pack::announce_port)))
 		{
 			req.listen_port = announce_port;
 		}
