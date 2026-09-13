@@ -3729,7 +3729,7 @@ namespace {
 			return;
 		}
 
-		if (!m_settings.get_bool(settings_pack::enable_incoming_tcp)
+		if (!trusted_inbound && !m_settings.get_bool(settings_pack::enable_incoming_tcp)
 			&& boost::get<tcp::socket>(&s))
 		{
 #ifndef TORRENT_DISABLE_LOGGING
