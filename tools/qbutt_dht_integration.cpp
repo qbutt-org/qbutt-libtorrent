@@ -3,7 +3,7 @@ Copyright (c) 2026, qbutt contributors
 Distributed under the BSD-style license in the LICENSE file.
 */
 
-// A bounded loopback integration fixture. No public network or payload writes.
+// Bounded local integration fixtures. No public network or payload writes.
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/bdecode.hpp>
@@ -159,8 +159,23 @@ packet query(lt::session& session, lt::udp::socket& server, lt::udp_route const&
 void check_tcp_retry_rejection(lt::settings_pack settings, lt::add_torrent_params add, bool const forced_utp)
 {
 	lt::io_context io;
-	lt::udp::socket blackhole(io, {lt::address_v4::loopback(), 0});
-	lt::tcp::acceptor listener(io, {lt::address_v4::loopback(), blackhole.local_endpoint().port()});
+	lt::tcp::acceptor listener(io);
+	lt::udp::socket blackhole(io, lt::udp::v4());
+	// Windows has separate TCP/UDP port exclusions. Keep both reservations;
+	// a port selected for one protocol need not be usable by the other.
+	for (int attempt = 0; attempt < 256; ++attempt)
+	{
+		listener.open(lt::tcp::v4());
+		listener.bind({lt::address_v4::loopback(), 0});
+		lt::error_code bind_error;
+		blackhole.bind({lt::address_v4::loopback(), listener.local_endpoint().port()}, bind_error);
+		if (!bind_error) break;
+		require(bind_error == boost::asio::error::access_denied
+			|| bind_error == boost::asio::error::address_in_use, "Unexpected shared fixture port bind failure");
+		listener.close();
+	}
+	require(listener.is_open(), "No common TCP/UDP fixture port is available");
+	listener.listen();
 	listener.non_blocking(true);
 	std::atomic<bool> closed{false}, settled{false}, revoke_error{false};
 	settings.set_bool(lt::settings_pack::enable_dht, false);
@@ -226,11 +241,46 @@ void check_tcp_retry_rejection(lt::settings_pack settings, lt::add_torrent_param
 		forced_utp ? "Forced uTP opened a TCP connection" : "Revoked generation opened a TCP connection");
 }
 
+void check_native_bootstrap(lt::address const& local)
+{
+	require(local.is_v4() && !local.is_unspecified() && !local.is_loopback(),
+		"Pass the local physical IPv4 address for native DHT integration");
+	lt::io_context io;
+	lt::udp::socket router(io, {local, 0});
+	router.non_blocking(true);
+	lt::settings_pack settings;
+	settings.set_str(lt::settings_pack::listen_interfaces, "");
+	settings.set_str(lt::settings_pack::dht_bootstrap_nodes,
+		local.to_string() + ":" + std::to_string(router.local_endpoint().port()));
+	settings.set_bool(lt::settings_pack::enable_dht, true);
+	settings.set_bool(lt::settings_pack::enable_lsd, false);
+	settings.set_bool(lt::settings_pack::enable_upnp, false);
+	settings.set_bool(lt::settings_pack::enable_natpmp, false);
+	settings.set_bool(lt::settings_pack::dht_enforce_node_id, false);
+	lt::session client(settings);
+	auto const ready_deadline = std::chrono::steady_clock::now() + 5s;
+	while (!client.is_dht_running() && std::chrono::steady_clock::now() < ready_deadline)
+		std::this_thread::sleep_for(10ms);
+	require(client.is_dht_running(), "Native DHT did not initialize without listeners");
+	lt::settings_pack bind;
+	bind.set_str(lt::settings_pack::listen_interfaces, local.to_string() + ":0");
+	client.apply_settings(bind);
+	auto const query = receive(router, 5s);
+	require(query.type == 'q', "Late native listener lost its configured DHT bootstrap routers");
+	require(query.source.address() == local, "Native DHT used the wrong physical source address");
+	std::cout << "{\"passed\":true,\"lateNativeListenerBootstrap\":true}\n";
+}
+
 } // anonymous namespace
 
 int main(int argc, char* argv[]) try
 {
-	require(argc == 2, "Pass an isolated fixture directory");
+	require(argc == 2 || argc == 3, "Pass an isolated fixture directory and optional physical IPv4");
+	if (argc == 3)
+	{
+		check_native_bootstrap(lt::make_address(argv[2]));
+		return 0;
+	}
 	lt::io_context io;
 	lt::udp::socket server(io, {lt::address_v4::loopback(), 0});
 	lt::udp::socket wrong_port(io, {lt::address_v4::loopback(), 0});

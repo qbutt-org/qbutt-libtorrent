@@ -2900,7 +2900,9 @@ namespace {
 					&& s->ssl != transport::ssl
 					&& !(s->flags & listen_socket_t::local_network))
 				{
-					m_dht->new_socket(m_listen_sockets.back());
+					// A replacement Native listener needs its routers before its
+					// initial lookup; the previous node's routing table is gone.
+					m_dht->new_socket(m_listen_sockets.back(), m_dht_router_nodes);
 				}
 #endif
 

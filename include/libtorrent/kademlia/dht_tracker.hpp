@@ -105,7 +105,7 @@ namespace dht {
 		// understanding of its external address (which may have changed)
 		void update_node_id(aux::listen_socket_handle const& s);
 
-		void new_socket(aux::listen_socket_handle const& s);
+		void new_socket(aux::listen_socket_handle const& s, span<udp::endpoint const> routers = {});
 		void delete_socket(aux::listen_socket_handle const& s);
 
 		void add_node(udp::endpoint const& node);

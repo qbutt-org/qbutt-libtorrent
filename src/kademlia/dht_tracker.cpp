@@ -121,7 +121,7 @@ namespace libtorrent { namespace dht {
 		update_storage_node_ids();
 	}
 
-	void dht_tracker::new_socket(aux::listen_socket_handle const& s)
+	void dht_tracker::new_socket(aux::listen_socket_handle const& s, span<udp::endpoint const> const routers)
 	{
 		address const local_address = s.get_local_endpoint().address();
 		auto stored_nid = std::find_if(m_state.nids.begin(), m_state.nids.end()
@@ -135,6 +135,9 @@ namespace libtorrent { namespace dht {
 			, s, this, m_settings, nid, m_log, m_counters
 			, std::bind(&dht_tracker::get_node, this, s, _1, _2)
 			, m_storage));
+		if (n.second)
+			for (auto const& router : routers)
+				n.first->second.dht.add_router_node(router);
 
 		update_storage_node_ids();
 
