@@ -441,7 +441,7 @@ namespace libtorrent {
 		// The authenticated loopback socket is not the remote egress socket.
 		// qbutt-net owns physical interface binding for this selected path.
 		tcp::endpoint bound_ip;
-		if (m_route_transport == peer_route::transport_t::utp)
+		if (m_route.path_id != 0 && is_utp(m_socket))
 			bound_ip = m_ses.bind_outgoing_socket(m_socket, m_remote.address(), ec, m_route);
 		else if (!m_route_local_endpoint.address().is_unspecified())
 		{
@@ -4244,23 +4244,30 @@ namespace libtorrent {
 			m_connecting = false;
 		}
 
-		// A route failure is not evidence that the original peer is bad. Keep
-		// normal retry pacing and let the selector choose another path next time.
+		bool const retry_utp = is_utp(m_socket) && m_peer_info && !m_holepunch_mode;
+		// A route failure is not evidence that the original peer lacks uTP.
+		// Automatic mode may retry TCP through the same admitted path, while
+		// explicit uTP and revoked generations remain fail-closed.
 		if (has_peer_route())
 		{
-			disconnect(e, operation_t::connect, normal);
-			return;
+			if (!retry_utp || !t || !t->managed_routes() || !t->allows_peer_route(*this)
+				|| m_route_transport != peer_route::transport_t::automatic
+				|| !m_settings.get_bool(settings_pack::enable_outgoing_tcp)
+				|| e == boost::asio::error::operation_aborted)
+			{
+				disconnect(e, operation_t::connect, normal);
+				return;
+			}
+			auto& failed_routes = m_peer_info->failed_utp_routes;
+			if (std::find(failed_routes.begin(), failed_routes.end(), m_route) == failed_routes.end())
+				failed_routes.push_back(m_route);
 		}
 
-		// a connection attempt using uTP just failed
-		// mark this peer as not supporting uTP
-		// we'll never try it again (unless we're trying holepunch)
-		if (is_utp(m_socket)
-			&& m_peer_info
-			&& m_peer_info->supports_utp
-			&& !m_holepunch_mode)
+		// Share upstream's deferred retry without changing global peer
+		// capability for a managed path failure.
+		if (retry_utp && (has_peer_route() || m_peer_info->supports_utp))
 		{
-			m_peer_info->supports_utp = false;
+			if (!has_peer_route()) m_peer_info->supports_utp = false;
 			// reconnect immediately using TCP
 			fast_reconnect(true);
 			disconnect(e, operation_t::connect, normal);
@@ -6475,7 +6482,7 @@ namespace libtorrent {
 		}
 		if (m_route_local_endpoint.address().is_unspecified()
 			&& m_route_type != peer_route::type_t::socks5
-			&& m_route_transport != peer_route::transport_t::utp
+			&& !(m_route.path_id != 0 && is_utp(m_socket))
 			&& !m_settings.get_str(settings_pack::outgoing_interfaces).empty())
 		{
 			if (!m_ses.verify_bound_address(m_local.address()

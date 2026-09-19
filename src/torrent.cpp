@@ -7750,6 +7750,14 @@ namespace {
 			|| !m_ip_filter
 			|| (m_ip_filter->access(peerinfo->address()) & ip_filter::blocked) == 0);
 
+		auto& failed_utp_routes = peerinfo->failed_utp_routes;
+		failed_utp_routes.erase(std::remove_if(failed_utp_routes.begin(), failed_utp_routes.end()
+			, [&](peer_route_context const context)
+			{
+				return !managed_routes() || std::none_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+					, [&](network_route const& r) { return r.binding.context == context; });
+			}), failed_utp_routes.end());
+
 		peer_route route;
 #if TORRENT_USE_I2P
 		if (!peerinfo->is_i2p_addr)
@@ -7764,6 +7772,8 @@ namespace {
 				&& settings().get_bool(settings_pack::enable_outgoing_utp)
 				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
 					|| peerinfo->supports_utp || peerinfo->confirmed_supports_utp)
+				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
+					|| std::find(failed_utp_routes.begin(), failed_utp_routes.end(), route.context) == failed_utp_routes.end())
 				&& m_ses.has_udp_route(route.context, a.address(), is_ssl_torrent(), route.type));
 		bool const explicit_bind = !route_utp && !route.local_endpoint.address().is_unspecified();
 		error_code route_error;
@@ -7848,7 +7858,8 @@ namespace {
 		else
 #endif
 		{
-			if (route_utp || (route.transport != peer_route::transport_t::tcp
+			if (route_utp || (route.context == peer_route_context{}
+				&& route.transport != peer_route::transport_t::tcp
 				&& !local_proxy && !explicit_bind && settings().get_bool(settings_pack::enable_outgoing_utp)
 				&& (!settings().get_bool(settings_pack::enable_outgoing_tcp)
 					|| peerinfo->supports_utp
@@ -7945,7 +7956,7 @@ namespace {
 			, route.type
 			, route_utp ? tcp::endpoint{} : route.local_endpoint
 			, route_utp ? 0 : route.native_interface_index
-			, route_utp ? peer_route::transport_t::utp : route.transport
+			, route.transport
 		};
 
 		auto c = std::make_shared<bt_peer_connection>(pack);

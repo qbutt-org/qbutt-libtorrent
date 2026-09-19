@@ -35,10 +35,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #ifndef TORRENT_TORRENT_PEER_HPP_INCLUDED
 #define TORRENT_TORRENT_PEER_HPP_INCLUDED
 
+#include <vector>
+
 #include "libtorrent/config.hpp"
 #include "libtorrent/address.hpp"
 #include "libtorrent/socket.hpp"
 #include "libtorrent/peer_info.hpp" // for peer_source_flags_t
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/info_hash.hpp"
 #include "libtorrent/aux_/string_ptr.hpp"
 #include "libtorrent/string_view.hpp"
@@ -98,6 +101,10 @@ namespace libtorrent {
 		// if the torrent_peer is connected now, this
 		// will refer to a valid peer_connection
 		peer_connection_interface* connection;
+
+		// Automatic uTP failures belong to a path generation, not to the peer
+		// globally. Pruned against the bounded route catalog before each dial.
+		std::vector<peer_route_context> failed_utp_routes;
 
 		// as computed by hashing our IP with the remote
 		// IP of this peer

@@ -185,6 +185,8 @@ namespace aux {
 		peer_route::type_t route_type = peer_route::type_t::session_default;
 		tcp::endpoint route_local_endpoint;
 		std::uint32_t native_interface_index = 0;
+		// Preserve the selector's automatic/explicit intent. The socket itself
+		// determines the transport actually in use.
 		peer_route::transport_t route_transport = peer_route::transport_t::automatic;
 	};
 
