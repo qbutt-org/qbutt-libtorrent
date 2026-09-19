@@ -1161,7 +1161,18 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			if (s->route && s->route->route.context == context && s->route->family == family
 				&& s->route->enable_dht && s->route_state == udp_route_state::ready)
 			{
-				m_dht->add_route_node(listen_socket_handle(s), node, router);
+				listen_socket_handle const socket(s);
+				m_dht->add_route_node(socket, node, router);
+				// Managed routers arrive after the route and often after the torrent
+				// has started. Retry its empty initial lookup through the existing
+				// priority queue; a traversal can query a router before it is in the
+				// routing table. Coalesce a batch of routers into one pending lookup.
+				if (router && !m_abort)
+					for (auto const& t : m_torrents)
+						if (t->allows_discovery_socket(socket)
+							&& std::none_of(m_dht_torrents.begin(), m_dht_torrents.end()
+								, [&t](std::weak_ptr<torrent> const& queued) { return queued.lock() == t; }))
+							prioritize_dht(t);
 				return {};
 			}
 		return boost::asio::error::network_unreachable;

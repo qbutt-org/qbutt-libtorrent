@@ -56,6 +56,7 @@ struct packet
 	lt::udp::endpoint source;
 	std::string transaction;
 	std::string query;
+	std::string info_hash;
 	std::string id;
 	char type = 0;
 	bool read_only = false;
@@ -85,7 +86,11 @@ packet receive(lt::udp::socket& socket, std::chrono::milliseconds const timeout)
 		require(type.size() == 1, "DHT fixture received invalid message type");
 		result.type = type[0];
 		auto const arguments = message.dict_find_dict(result.type == 'q' ? "a" : "r");
-		if (arguments) result.id = arguments.dict_find_string_value("id").to_string();
+		if (arguments)
+		{
+			result.id = arguments.dict_find_string_value("id").to_string();
+			result.info_hash = arguments.dict_find_string_value("info_hash").to_string();
+		}
 		result.read_only = message.dict_find_int_value("ro") == 1;
 		return result;
 	}
@@ -304,8 +309,28 @@ int main(int argc, char* argv[]) try
 	add.file_priorities = {lt::dont_download};
 	add.flags &= ~(lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
 	add.flags |= lt::torrent_flags::disable_pex | lt::torrent_flags::disable_lsd;
+	lt::settings_pack toggle;
+	toggle.set_bool(lt::settings_pack::enable_dht, false);
+	session.apply_settings(toggle);
+	require(!session.get_settings().get_bool(lt::settings_pack::enable_dht), "Failed to stop DHT");
+	current = route(3);
+	require(!session.set_udp_routes({current}), "Failed to install empty replacement DHT owner");
+	policy(session, current);
 	auto const torrent = session.add_torrent(add);
-	torrent.force_dht_announce();
+	auto const hash = add.ti->info_hashes().v1;
+	std::string const wanted_hash(hash.data(), hash.size());
+	// Start the torrent before enabling DHT, as the application does. The
+	// initial start_announcing cannot enqueue DHT work while it is disabled.
+	auto const active_deadline = std::chrono::steady_clock::now() + 8s;
+	while (torrent.status().state != lt::torrent_status::finished
+		&& std::chrono::steady_clock::now() < active_deadline)
+		std::this_thread::sleep_for(10ms);
+	require(torrent.status().state == lt::torrent_status::finished, "Fixture torrent never became active");
+	toggle.set_bool(lt::settings_pack::enable_dht, true);
+	session.apply_settings(toggle);
+	require(session.get_settings().get_bool(lt::settings_pack::enable_dht), "Failed to enable DHT");
+	require(!session.add_dht_route_node(current.route.context, current.family, server.local_endpoint(), true),
+		"Failed to add late managed bootstrap router");
 	auto const candidate = lt::tcp::endpoint(lt::make_address("127.0.0.9"), 49001);
 	bool found = false;
 	int peer_queries = 0;
@@ -318,7 +343,7 @@ int main(int argc, char* argv[]) try
 			require(request.type == 'q' && request.read_only, "Readonly route emitted a DHT response");
 			require(request.query != "announce_peer", "Outgoing route announced a false listener");
 			auto reply = response(request, learned_address);
-			if (request.query == "get_peers")
+			if (request.query == "get_peers" && request.info_hash == wanted_hash)
 			{
 				++peer_queries;
 				reply["r"]["values"].list().emplace_back(compact(candidate.address(), candidate.port()));
@@ -333,7 +358,7 @@ int main(int argc, char* argv[]) try
 	require(found && peer_queries > 0, "DHT candidate did not reach the torrent peer pool");
 
 	// A verified gateway descriptor retains its known identity and server role.
-	current = route(3);
+	current = route(4);
 	current.external_address = lt::make_address("8.8.4.4");
 	current.public_endpoint = {current.external_address, 42001};
 	require(!session.set_udp_routes({current}), "Known public DHT descriptor was rejected");
@@ -359,7 +384,7 @@ int main(int argc, char* argv[]) try
 	check_tcp_retry_rejection(settings, add, false);
 	std::cout << "{\"passed\":true,\"unknownEgressAccepted\":true,\"correlatedBep42Learning\":true"
 		<< ",\"unsolicitedAndWrongPortRejected\":true,\"staleGenerationRejected\":true"
-		<< ",\"readOnly\":true,\"dhtPeerCandidates\":1,\"knownGatewayPreserved\":true"
+		<< ",\"readOnly\":true,\"dhtPeerCandidates\":1,\"lateManagedBootstrap\":true,\"knownGatewayPreserved\":true"
 		<< ",\"forcedUtpNoTcp\":true,\"queuedRevocationNoTcp\":true}\n";
 }
 catch (std::exception const& error)
