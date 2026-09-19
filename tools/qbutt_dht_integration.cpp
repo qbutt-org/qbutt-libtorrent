@@ -5,6 +5,7 @@ Distributed under the BSD-style license in the LICENSE file.
 
 // A bounded loopback integration fixture. No public network or payload writes.
 #include <libtorrent/add_torrent_params.hpp>
+#include <libtorrent/alert_types.hpp>
 #include <libtorrent/bdecode.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/entry.hpp>
@@ -17,6 +18,8 @@ Distributed under the BSD-style license in the LICENSE file.
 #include <libtorrent/udp_route.hpp>
 
 #include <array>
+#include <atomic>
+#include <boost/asio/post.hpp>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -146,6 +149,76 @@ packet query(lt::session& session, lt::udp::socket& server, lt::udp_route const&
 	require(request.type == 'q' && request.id.size() == 20, "No route DHT query");
 	require(request.read_only == (route.public_endpoint.port() == 0), "Incorrect DHT read-only flag");
 	return request;
+}
+
+void check_tcp_retry_rejection(lt::settings_pack settings, lt::add_torrent_params add, bool const forced_utp)
+{
+	lt::io_context io;
+	lt::udp::socket blackhole(io, {lt::address_v4::loopback(), 0});
+	lt::tcp::acceptor listener(io, {lt::address_v4::loopback(), blackhole.local_endpoint().port()});
+	listener.non_blocking(true);
+	std::atomic<bool> closed{false}, settled{false}, revoke_error{false};
+	settings.set_bool(lt::settings_pack::enable_dht, false);
+	settings.set_bool(lt::settings_pack::enable_outgoing_tcp, true);
+	settings.set_bool(lt::settings_pack::enable_outgoing_utp, true);
+	settings.set_int(lt::settings_pack::peer_connect_timeout, 1);
+	settings.set_int(lt::settings_pack::alert_mask, int(lt::alert_category::status | lt::alert_category::error));
+	lt::session client(settings);
+	auto path = route(forced_utp ? 10 : 11);
+	path.enable_dht = false;
+	path.enable_utp = true;
+	require(!client.set_udp_routes({path}), "Failed to install transport fixture route");
+	policy(client, path);
+	bool ready = false;
+	auto const ready_deadline = std::chrono::steady_clock::now() + 2s;
+	while (!ready && std::chrono::steady_clock::now() < ready_deadline)
+	{
+		std::vector<lt::alert*> alerts;
+		client.pop_alerts(&alerts);
+		for (auto const* alert : alerts)
+			if (auto const* udp = lt::alert_cast<lt::udp_route_alert>(alert))
+				ready |= udp->route == path.route.context && udp->state == lt::udp_route_state::ready;
+		std::this_thread::sleep_for(10ms);
+	}
+	require(ready, "Transport fixture route never became ready");
+	client.set_peer_route_selector([path, forced_utp, &closed](lt::peer_route_request const&)
+	{
+		auto selected = path.route;
+		if (!forced_utp && closed) selected.type = lt::peer_route::type_t::blocked;
+		selected.transport = forced_utp ? lt::peer_route::transport_t::utp : lt::peer_route::transport_t::automatic;
+		return selected;
+	}, [&](lt::peer_route_observation const& event)
+	{
+		if (event.event != lt::peer_route_observation::event_t::closed || !event.error || closed.exchange(true)) return;
+		// This precedes connect_failed's deferred retry. A second queued turn
+		// acknowledges that the retry ran, without relying on a sleep.
+		boost::asio::post(client.get_context(), [&]
+		{
+			if (!forced_utp)
+			{
+				revoke_error = bool(client.set_torrent_route_policy_selector([](lt::torrent_route_request const&)
+				{
+					lt::torrent_route_policy denied;
+					denied.mode = lt::torrent_route_policy::mode_t::managed;
+					return denied;
+				}));
+			}
+			boost::asio::post(client.get_context(), [&] { settled = true; });
+		});
+	});
+	add.save_path += forced_utp ? "/forced-utp" : "/revoked-retry";
+	auto torrent = client.add_torrent(add);
+	torrent.connect_peer(listener.local_endpoint());
+	auto const deadline = std::chrono::steady_clock::now() + 8s;
+	while (!settled && std::chrono::steady_clock::now() < deadline)
+		std::this_thread::sleep_for(10ms);
+	require(closed && settled && !revoke_error, "Transport rejection fixture did not exercise failure");
+	require(blackhole.available() > 0, "Transport fixture never received a uTP attempt");
+	lt::tcp::socket unexpected(io);
+	lt::error_code error;
+	listener.accept(unexpected, error);
+	require(error == boost::asio::error::would_block || error == boost::asio::error::try_again,
+		forced_utp ? "Forced uTP opened a TCP connection" : "Revoked generation opened a TCP connection");
 }
 
 } // anonymous namespace
@@ -282,9 +355,12 @@ int main(int argc, char* argv[]) try
 	}
 	require(gateway_reply, "Verified gateway stopped answering DHT queries");
 	require(!session.set_udp_routes({}), "Failed to retire the fixture routes");
+	check_tcp_retry_rejection(settings, add, true);
+	check_tcp_retry_rejection(settings, add, false);
 	std::cout << "{\"passed\":true,\"unknownEgressAccepted\":true,\"correlatedBep42Learning\":true"
 		<< ",\"unsolicitedAndWrongPortRejected\":true,\"staleGenerationRejected\":true"
-		<< ",\"readOnly\":true,\"dhtPeerCandidates\":1,\"knownGatewayPreserved\":true}\n";
+		<< ",\"readOnly\":true,\"dhtPeerCandidates\":1,\"knownGatewayPreserved\":true"
+		<< ",\"forcedUtpNoTcp\":true,\"queuedRevocationNoTcp\":true}\n";
 }
 catch (std::exception const& error)
 {

@@ -4261,13 +4261,29 @@ namespace libtorrent {
 			auto& failed_routes = m_peer_info->failed_utp_routes;
 			if (std::find(failed_routes.begin(), failed_routes.end(), m_route) == failed_routes.end())
 				failed_routes.push_back(m_route);
+			std::weak_ptr<torrent> weak_t = t;
+			tcp::endpoint const endpoint = m_remote;
+			peer_route_context const retry_route = m_route;
+			fast_reconnect(true);
+			disconnect(e, operation_t::connect, normal);
+			// Disconnect detaches the torrent_peer. Resolve it again after the
+			// queue drains; neither the peer nor this connection must stay alive.
+			post(m_ios, [weak_t, endpoint, retry_route]()
+			{
+				if (auto tor = weak_t.lock())
+				{
+					auto const range = tor->find_peers(endpoint.address());
+					auto const peer = std::find_if(range.first, range.second
+						, [&](torrent_peer const* pi) { return pi->ip() == endpoint; });
+					if (peer != range.second) tor->connect_to_peer(*peer, false, retry_route);
+				}
+			});
+			return;
 		}
 
-		// Share upstream's deferred retry without changing global peer
-		// capability for a managed path failure.
-		if (retry_utp && (has_peer_route() || m_peer_info->supports_utp))
+		if (retry_utp && m_peer_info->supports_utp)
 		{
-			if (!has_peer_route()) m_peer_info->supports_utp = false;
+			m_peer_info->supports_utp = false;
 			// reconnect immediately using TCP
 			fast_reconnect(true);
 			disconnect(e, operation_t::connect, normal);

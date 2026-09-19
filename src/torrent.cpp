@@ -7711,11 +7711,24 @@ namespace {
 	};
 #endif
 
-	torrent::peer_connect_result torrent::connect_to_peer(torrent_peer* peerinfo, bool const ignore_limit)
+	torrent::peer_connect_result torrent::connect_to_peer(torrent_peer* peerinfo, bool const ignore_limit
+		, peer_route_context const tcp_retry)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		INVARIANT_CHECK;
 		TORRENT_UNUSED(ignore_limit);
+
+		bool const routed_retry = tcp_retry != peer_route_context{};
+		if (routed_retry && (!peerinfo || peerinfo->connection || peerinfo->banned
+			|| !peerinfo->connectable || !managed_routes() || !want_peers()
+			|| !settings().get_bool(settings_pack::enable_outgoing_tcp)
+			|| m_ses.num_connections() >= settings().get_int(settings_pack::connections_limit)
+			|| !allows_peer_source(peerinfo->peer_source())
+			|| (m_apply_ip_filter && m_ip_filter
+				&& (m_ip_filter->access(peerinfo->address()) & ip_filter::blocked))
+			|| (m_ses.get_port_filter().access(peerinfo->port) & port_filter::blocked)
+			|| (settings().get_bool(settings_pack::no_connect_privileged_ports) && peerinfo->port < 1024)))
+			return peer_connect_result::rejected;
 
 		TORRENT_ASSERT(peerinfo);
 		TORRENT_ASSERT(peerinfo->connection == nullptr);
@@ -7759,6 +7772,18 @@ namespace {
 			}), failed_utp_routes.end());
 
 		peer_route route;
+		if (routed_retry)
+		{
+			// A transport retry retains the application's selected path. Resolve
+			// its binding again so a queued retry cannot resurrect a generation.
+			auto const current = std::find_if(m_route_policy.routes.begin(), m_route_policy.routes.end()
+				, [&](network_route const& r) { return r.binding.context == tcp_retry
+					&& (r.family == route_family::ipv4) == a.address().is_v4(); });
+			if (current == m_route_policy.routes.end()) return peer_connect_result::rejected;
+			static_cast<route_descriptor&>(route) = current->binding;
+			route.transport = peer_route::transport_t::tcp;
+		}
+		else
 #if TORRENT_USE_I2P
 		if (!peerinfo->is_i2p_addr)
 #endif
