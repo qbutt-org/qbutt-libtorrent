@@ -277,6 +277,7 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 	for (auto i = range.first; i != range.second; ++i)
 	{
 		if (m.addr.address() != i->second->target_addr()) continue;
+		if (m_sock.route_context().path_id != 0 && m.addr != i->second->target_ep()) continue;
 		o = i->second;
 		i = m_transactions.erase(i);
 		break;
@@ -300,6 +301,28 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
 //		incoming_error(e, "invalid transaction id");
 //		m_sock->send_packet(e, m.addr);
 		return false;
+	}
+
+	// An unsolicited packet must not set a managed route's node identity. Learn
+	// only after matching the endpoint and transaction on this exact socket.
+	// BEP 42 errors can carry the address needed to generate a valid node ID.
+	if (m_sock.route_context().path_id != 0)
+	{
+		if (o->algorithm()->route_operation_aborted())
+		{
+			o->abort();
+			return false;
+		}
+		auto const ip = m.message.dict_find_string("ip");
+		auto* const observer = o->get_observer();
+		if (ip && observer != nullptr)
+		{
+			char const* ptr = ip.string_ptr();
+			if (ip.string_length() == 4 || ip.string_length() == 6)
+				observer->set_external_address(m_sock, aux::read_v4_address(ptr), m.addr.address());
+			else if (ip.string_length() == 16 || ip.string_length() == 18)
+				observer->set_external_address(m_sock, aux::read_v6_address(ptr), m.addr.address());
+		}
 	}
 
 	time_point const now = clock_type::now();
@@ -486,7 +509,7 @@ bool rpc_manager::invoke(entry& e, udp::endpoint const& target_addr
 
 	// When a DHT node enters the read-only state, in each outgoing query message,
 	// places a 'ro' key in the top-level message dictionary and sets its value to 1.
-	if (m_settings.get_bool(settings_pack::dht_read_only)) e["ro"] = 1;
+	if (m_settings.get_bool(settings_pack::dht_read_only) || m_sock.is_read_only_dht()) e["ro"] = 1;
 
 	node& n = o->algorithm()->get_node();
 	if (!n.native_address(o->target_addr()))

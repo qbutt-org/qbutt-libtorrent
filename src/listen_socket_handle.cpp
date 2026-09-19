@@ -41,7 +41,17 @@ namespace libtorrent { namespace aux {
 		auto s = m_sock.lock();
 		TORRENT_ASSERT(s);
 		if (!s) throw_ex<std::bad_weak_ptr>();
-		return s->route ? s->route->external_address : s->external_address.external_address();
+		if (s->route && !s->route->external_address.is_unspecified())
+			return s->route->external_address;
+		auto const observed = s->external_address.external_address();
+		return s->route && s->route->family == route_family::ipv6 && observed.is_unspecified()
+			? address(address_v6{}) : observed;
+	}
+
+	bool listen_socket_handle::is_read_only_dht() const
+	{
+		auto s = m_sock.lock();
+		return s && s->route && s->route->public_endpoint.port() == 0;
 	}
 
 	tcp::endpoint listen_socket_handle::get_public_endpoint() const

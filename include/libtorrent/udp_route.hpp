@@ -26,8 +26,9 @@ struct udp_route
 	bool enable_dht = false;
 	bool enable_trackers = false;
 
-	// The remote UDP egress address verified by the application. DHT requires it
-	// for its node identity. An unspecified address means the egress is unknown.
+	// The remote UDP egress address verified by the application. If unspecified,
+	// outgoing-only DHT learns its node identity address from correlated replies.
+	// This runtime observation never establishes a public peer listener.
 	address external_address;
 
 	// A UDP peer listener verified by the application. Its address may match

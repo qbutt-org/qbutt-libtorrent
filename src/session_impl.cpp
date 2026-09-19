@@ -1492,7 +1492,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 				|| (!i->external_address.is_unspecified()
 					&& (!is_global(i->external_address) || i->external_address.is_v4() != ipv4))
 				|| !valid_advertised_endpoint(i->public_endpoint, ipv4)
-				|| (i->enable_dht && i->external_address.is_unspecified()))
+				|| (i->enable_dht && i->external_address.is_unspecified()
+					&& i->public_endpoint.port() != 0))
 				return boost::asio::error::invalid_argument;
 			if (socks)
 			{
@@ -7875,9 +7876,21 @@ namespace {
 	void session_impl::set_external_address(std::shared_ptr<listen_socket_t> const& sock
 		, address const& ip, ip_source_t const source_type, address const& source)
 	{
-		// Managed identities use the descriptor's verified address. Peer votes
-		// cannot replace that source fact within the same generation.
-		if (sock->route) return;
+		if (sock->route)
+		{
+			// Correlated DHT observations belong to this outgoing socket only.
+			// They cannot replace a verified descriptor or publish a listener.
+			if (!sock->route->external_address.is_unspecified()
+				|| sock->route->public_endpoint.port() != 0
+				|| !sock->route->enable_dht || sock->route_state != udp_route_state::ready
+				|| source_type != source_dht || !is_global(ip)
+				|| ip.is_v4() != (sock->route->family == route_family::ipv4)) return;
+			if (!sock->external_address.cast_vote(ip, source_type, source)) return;
+#ifndef TORRENT_DISABLE_DHT
+			if (m_dht) m_dht->update_node_id(sock);
+#endif
+			return;
+		}
 		if (!sock->external_address.cast_vote(ip, source_type, source)) return;
 
 #ifndef TORRENT_DISABLE_LOGGING

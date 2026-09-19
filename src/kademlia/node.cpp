@@ -282,7 +282,7 @@ void node::incoming(aux::listen_socket_handle const& s, msg const& m)
 
 	// we can only ascribe the external IP this node is saying we have to the
 	// listen socket the packet was received on
-	if (s == m_sock)
+	if (s == m_sock && m_sock.route_context().path_id == 0)
 	{
 		bdecode_node ext_ip = m.message.dict_find_string("ip");
 
@@ -316,7 +316,7 @@ void node::incoming(aux::listen_socket_handle const& s, msg const& m)
 			TORRENT_ASSERT(m.message.dict_find_string_value("y") == "q");
 			// When a DHT node enters the read-only state, it no longer
 			// responds to 'query' messages that it receives.
-			if (m_settings.get_bool(settings_pack::dht_read_only)) break;
+			if (m_settings.get_bool(settings_pack::dht_read_only) || m_sock.is_read_only_dht()) break;
 
 			// ignore packets arriving on a different interface than the one we're
 			// associated with

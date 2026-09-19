@@ -6,3 +6,6 @@ target_link_libraries(dht_sample PRIVATE torrent-rasterbar)
 
 add_executable(session_log_alerts session_log_alerts.cpp)
 target_link_libraries(session_log_alerts PRIVATE torrent-rasterbar)
+
+add_executable(qbutt_dht_integration EXCLUDE_FROM_ALL qbutt_dht_integration.cpp)
+target_link_libraries(qbutt_dht_integration PRIVATE torrent-rasterbar)
