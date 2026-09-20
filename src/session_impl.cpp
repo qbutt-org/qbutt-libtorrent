@@ -1524,7 +1524,10 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			if (i->ssl) return boost::asio::error::operation_not_supported;
 #endif
 			for (auto j = routes.begin(); j != i; ++j)
-				if (same_udp_identity(*i, *j)) return boost::asio::error::invalid_argument;
+				if (same_udp_identity(*i, *j)
+					|| (i->public_endpoint.port() != 0 && i->public_endpoint == j->public_endpoint
+						&& i->ssl != j->ssl))
+					return boost::asio::error::invalid_argument;
 			for (auto const& s : m_listen_sockets)
 				if (s->route && same_udp_identity(*i, *s->route)
 					&& !same_udp_descriptor(*i, *s->route))
@@ -3704,6 +3707,26 @@ namespace {
 #endif
 			return;
 		}
+		utp_stream* utp = boost::get<utp_stream>(&s);
+#ifdef TORRENT_SSL_PEERS
+		if (auto* ssl = boost::get<ssl_stream<utp_stream>>(&s))
+			utp = &ssl->next_layer();
+#endif
+		if (utp)
+		{
+			auto const owner = utp->get_impl()->m_sock.lock();
+			auto const socket = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
+				, [&](auto const& candidate) { return candidate.get() == owner.get(); });
+			if (socket == m_listen_sockets.end() || !(*socket)->accept_incoming_utp()) return;
+			if ((*socket)->route)
+			{
+				auto const& route = *(*socket)->route;
+				if (endp.address().is_v4() != (route.family == route_family::ipv4)
+					|| endp == route.public_endpoint) return;
+				incoming_connection(std::move(s), endp, route.route.context, route.route.type);
+				return;
+			}
+		}
 		incoming_connection(std::move(s), endp, {}, peer_route::type_t::session_default);
 	}
 
@@ -3714,7 +3737,9 @@ namespace {
 		TORRENT_ASSERT((route_type == peer_route::type_t::session_default)
 			== (context == peer_route_context{}));
 		TORRENT_ASSERT(route_type == peer_route::type_t::session_default
-			|| route_type == peer_route::type_t::trusted_inbound);
+			|| route_type == peer_route::type_t::trusted_inbound
+			|| (is_utp(s) && (route_type == peer_route::type_t::socks5
+				|| route_type == peer_route::type_t::native)));
 		bool const trusted_inbound = route_type == peer_route::type_t::trusted_inbound;
 
 		if (m_abort)
@@ -3761,7 +3786,7 @@ namespace {
 
 		// if there are outgoing interfaces specified, verify this
 		// peer is correctly bound to one of them
-		if (!trusted_inbound && !m_outgoing_interfaces.empty())
+		if (context == peer_route_context{} && !m_outgoing_interfaces.empty())
 		{
 			tcp::endpoint local = s.local_endpoint(ec);
 			if (ec)
@@ -3923,6 +3948,7 @@ namespace {
 		if (m_alerts.should_post<incoming_connection_alert>())
 			m_alerts.emplace_alert<incoming_connection_alert>(socket_type_idx(s), endp);
 
+		bool const utp = is_utp(s);
 		peer_connection_args pack{
 			this
 			, &m_settings
@@ -3937,7 +3963,7 @@ namespace {
 		};
 		pack.route = context;
 		pack.route_type = route_type;
-		pack.route_transport = peer_route::transport_t::tcp;
+		pack.route_transport = utp ? peer_route::transport_t::utp : peer_route::transport_t::tcp;
 
 		std::shared_ptr<peer_connection> c
 			= std::make_shared<bt_peer_connection>(pack);

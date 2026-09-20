@@ -293,7 +293,7 @@ int main(int argc, char* argv[]) try
 	settings.set_bool(lt::settings_pack::enable_upnp, false);
 	settings.set_bool(lt::settings_pack::enable_natpmp, false);
 	settings.set_bool(lt::settings_pack::enable_incoming_tcp, false);
-	settings.set_bool(lt::settings_pack::enable_incoming_utp, false);
+	settings.set_bool(lt::settings_pack::enable_incoming_utp, true);
 	settings.set_bool(lt::settings_pack::dht_enforce_node_id, false);
 	settings.set_bool(lt::settings_pack::dht_restrict_routing_ips, false);
 	settings.set_bool(lt::settings_pack::dht_restrict_search_ips, false);
@@ -301,9 +301,19 @@ int main(int argc, char* argv[]) try
 	lt::session session(settings);
 	session.set_peer_route_selector([](lt::peer_route_request const&) { return lt::peer_route{}; });
 	auto current = route(1);
+	current.enable_utp = true;
 	require(!session.set_udp_routes({current}), "Unknown DHT egress was rejected");
 	policy(session, current);
 	auto const original = query(session, server, current);
+	// An outgoing UDP association is not permission to accept new peers.
+	std::array<char, 20> syn{};
+	syn[0] = '\x41'; // ST_SYN, uTP version 1
+	syn[2] = '\x42';
+	syn[3] = '\x42';
+	syn[14] = '\x10'; // Nonzero receive window
+	syn[17] = '\x01';
+	server.send_to(boost::asio::buffer(syn), original.source);
+	require(receive(server, 200ms).type == 0, "Unadvertised route answered an incoming uTP SYN");
 	auto const learned_address = lt::make_address("8.8.8.8");
 	auto const forged_address = lt::make_address("9.9.9.9");
 	auto forged = response(original, forged_address);
@@ -412,6 +422,11 @@ int main(int argc, char* argv[]) try
 	current.external_address = lt::make_address("8.8.4.4");
 	current.public_endpoint = {current.external_address, 42001};
 	require(!session.set_udp_routes({current}), "Known public DHT descriptor was rejected");
+	auto conflicting_tls = current;
+	conflicting_tls.ssl = true;
+	conflicting_tls.enable_dht = false;
+	require(session.set_udp_routes({current, conflicting_tls}) == boost::asio::error::invalid_argument,
+		"Plain and TLS uTP shared one public SYN listener");
 	policy(session, current);
 	auto const known = query(session, server, current);
 	send(server, known.source, response(known, forged_address));
@@ -435,6 +450,7 @@ int main(int argc, char* argv[]) try
 	std::cout << "{\"passed\":true,\"unknownEgressAccepted\":true,\"correlatedBep42Learning\":true"
 		<< ",\"unsolicitedAndWrongPortRejected\":true,\"staleGenerationRejected\":true"
 		<< ",\"readOnly\":true,\"dhtPeerCandidates\":1,\"lateManagedBootstrap\":true,\"knownGatewayPreserved\":true"
+		<< ",\"unadvertisedUtpRejected\":true,\"ambiguousTlsPortRejected\":true"
 		<< ",\"forcedUtpNoTcp\":true,\"queuedRevocationNoTcp\":true}\n";
 }
 catch (std::exception const& error)

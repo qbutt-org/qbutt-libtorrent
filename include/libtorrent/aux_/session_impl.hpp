@@ -184,7 +184,11 @@ namespace aux {
 		listen_socket_t() = default;
 		std::unique_ptr<udp_route const> route;
 		udp_route_state route_state = udp_route_state::pending;
-		bool accept_incoming_utp() const override { return !route; }
+		bool accept_incoming_utp() const override
+		{
+			return !route || (route_state == udp_route_state::ready
+				&& route->enable_utp && route->public_endpoint.port() != 0);
+		}
 		bool use_socks5() const override
 		{
 			if (!udp_sock) return false;
