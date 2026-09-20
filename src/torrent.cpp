@@ -3075,8 +3075,8 @@ namespace {
 			auto const endpoint = std::find_if(entry.endpoints.begin(), entry.endpoints.end()
 				, [&](aux::announce_endpoint const& candidate)
 				{
-					return candidate.route
-						&& *candidate.route == request.route_operation->route;
+					return (candidate.route && *candidate.route == request.route_operation->route)
+						|| (candidate.socket && candidate.socket == request.outgoing_socket);
 				});
 			return endpoint == entry.endpoints.end() ? nullptr : &*endpoint;
 		}
