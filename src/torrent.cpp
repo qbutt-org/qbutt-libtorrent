@@ -6021,6 +6021,7 @@ namespace {
 				tr.endpoints.emplace_back();
 				auto& aep = tr.endpoints.back();
 				aep.local_endpoint = ep.local_endpoint;
+				aep.route = ep.route ? ep.route->binding.context : ep.socket.route_context();
 				aep.enabled = ep.enabled;
 
 				for (protocol_version v : {protocol_version::V1, protocol_version::V2})

@@ -41,6 +41,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/error_code.hpp"
 #include "libtorrent/string_view.hpp"
 #include "libtorrent/socket.hpp"
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/aux_/array.hpp"
 #include "libtorrent/info_hash.hpp"
 
@@ -149,6 +150,9 @@ TORRENT_VERSION_NAMESPACE_2
 
 		// the local endpoint of the listen interface associated with this endpoint
 		tcp::endpoint local_endpoint;
+		// Identity of the route that owned this endpoint when it was sampled.
+		// Zero identifies the ordinary session route.
+		peer_route_context route;
 
 		// torrents can be announced using multiple info hashes
 		// for different protocol versions
