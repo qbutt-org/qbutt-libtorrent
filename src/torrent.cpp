@@ -3023,10 +3023,32 @@ namespace {
 		bool const udp = url.compare(0, 6, "udp://") == 0;
 		if (tor.managed_routes() && !udp)
 		{
+			error_code url_error;
+			auto const components = parse_url_components(url, url_error);
+			error_code address_error;
+			address const numeric = make_address(std::get<2>(components), address_error);
 			std::size_t valid_endpoints = 0;
 			for (auto const& route : tor.route_policy().routes)
 			{
 				if (!tor.allows_route(route.binding.context, route.family)) continue;
+				if (!url_error && !address_error
+					&& (route.family == route_family::ipv4) != numeric.is_v4()) continue;
+				if (!url_error && address_error && route.binding.type == route_descriptor::type_t::socks5)
+				{
+					// SOCKS hostname resolution belongs to the path, not to its
+					// advertised listener family. Do not send the same announce
+					// twice and replace a known public listener with port 1.
+					auto const priority = std::make_pair(route.public_endpoint.port() != 0
+						, route.family == route_family::ipv4);
+					if (std::any_of(tor.route_policy().routes.begin(), tor.route_policy().routes.end()
+						, [&](network_route const& other)
+						{
+							return other.binding == route.binding
+								&& tor.allows_route(other.binding.context, other.family)
+								&& std::make_pair(other.public_endpoint.port() != 0
+									, other.family == route_family::ipv4) > priority;
+						})) continue;
+				}
 				auto const existing = std::find_if(aeps.begin() + int(valid_endpoints), aeps.end()
 					, [&](aux::announce_endpoint const& endpoint)
 					{ return endpoint.route && *endpoint.route == route; });
