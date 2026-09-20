@@ -3436,7 +3436,8 @@ namespace {
 					if (m_ses.alerts().should_post<tracker_announce_alert>())
 					{
 						m_ses.alerts().emplace_alert<tracker_announce_alert>(
-							get_handle(), aep.local_endpoint, req.url, ih, req.event);
+							get_handle(), aep.local_endpoint, req.url, ih, req.event
+							, req.route_operation->route.binding.context);
 					}
 
 					state.sent_announce = true;
@@ -3536,7 +3537,8 @@ namespace {
 
 		if (m_ses.alerts().should_post<tracker_warning_alert>())
 			m_ses.alerts().emplace_alert<tracker_warning_alert>(get_handle()
-				, local_endpoint, req.url, hash_version, msg);
+				, local_endpoint, req.url, hash_version, msg
+				, req.route_operation ? req.route_operation->route.binding.context : peer_route_context{});
 	}
 
 	void torrent::tracker_scrape_response(tracker_request const& req
@@ -3831,7 +3833,8 @@ namespace {
 #endif
 			m_ses.alerts().emplace_alert<tracker_reply_alert>(
 				get_handle(), local_endpoint, peer_count
-				+ int(resp.peers6.size()), v, r.url);
+				+ int(resp.peers6.size()), v, r.url
+				, r.route_operation ? r.route_operation->route.binding.context : peer_route_context{});
 		}
 
 		do_connect_boost();
@@ -12671,7 +12674,8 @@ namespace {
 				|| r.triggered_manually)
 			{
 				m_ses.alerts().emplace_alert<tracker_error_alert>(get_handle()
-					, local_endpoint, fails, hash_version, r.url, op, ec, msg);
+					, local_endpoint, fails, hash_version, r.url, op, ec, msg
+					, r.route_operation ? r.route_operation->route.binding.context : peer_route_context{});
 			}
 		}
 		else

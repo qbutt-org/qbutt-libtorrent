@@ -174,9 +174,10 @@ namespace libtorrent {
 	}
 
 	tracker_alert::tracker_alert(aux::stack_allocator& alloc
-		, torrent_handle const& h, tcp::endpoint const& ep, string_view u)
+		, torrent_handle const& h, tcp::endpoint const& ep, string_view u, peer_route_context const context)
 		: torrent_alert(alloc, h)
 		, local_endpoint(ep)
+		, route(context)
 		, m_url_idx(alloc.copy_string(u))
 #if TORRENT_ABI_VERSION == 1
 		, url(u)
@@ -391,8 +392,8 @@ namespace libtorrent {
 		, torrent_handle const& h, tcp::endpoint const& ep, int times
 		, protocol_version v, string_view u, operation_t const operation
 		, error_code const& e
-		, string_view m)
-		: tracker_alert(alloc, h, ep, u)
+		, string_view m, peer_route_context const context)
+		: tracker_alert(alloc, h, ep, u, context)
 		, times_in_row(times)
 		, error(e)
 		, op(operation)
@@ -429,8 +430,8 @@ namespace libtorrent {
 
 	tracker_warning_alert::tracker_warning_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h, tcp::endpoint const& ep
-		, string_view u, protocol_version v, string_view m)
-		: tracker_alert(alloc, h, ep, u)
+		, string_view u, protocol_version v, string_view m, peer_route_context const context)
+		: tracker_alert(alloc, h, ep, u, context)
 		, m_msg_idx(alloc.copy_string(m))
 #if TORRENT_ABI_VERSION == 1
 		, msg(m)
@@ -526,8 +527,8 @@ namespace libtorrent {
 
 	tracker_reply_alert::tracker_reply_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h, tcp::endpoint const& ep
-		, int np, protocol_version v, string_view u)
-		: tracker_alert(alloc, h, ep, u)
+		, int np, protocol_version v, string_view u, peer_route_context const context)
+		: tracker_alert(alloc, h, ep, u, context)
 		, num_peers(np)
 		// TODO: move this field into tracker_alert
 		, version(v)
@@ -570,8 +571,8 @@ namespace libtorrent {
 
 	tracker_announce_alert::tracker_announce_alert(aux::stack_allocator& alloc
 		, torrent_handle const& h, tcp::endpoint const& ep, string_view u
-		, protocol_version const v, event_t const e)
-		: tracker_alert(alloc, h, ep, u)
+		, protocol_version const v, event_t const e, peer_route_context const context)
+		: tracker_alert(alloc, h, ep, u, context)
 		, event(e)
 		// TODO: move this to tracker_alert
 		, version(v)

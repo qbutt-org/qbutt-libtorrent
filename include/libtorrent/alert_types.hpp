@@ -60,6 +60,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/performance_counters.hpp"
 #include "libtorrent/operations.hpp" // for operation_t enum
 #include "libtorrent/udp_route.hpp"
+#include "libtorrent/peer_route.hpp"
 #include "libtorrent/close_reason.hpp"
 #include "libtorrent/piece_block.hpp"
 #include "libtorrent/aux_/escape_string.hpp" // for convert_from_native
@@ -198,7 +199,7 @@ TORRENT_VERSION_NAMESPACE_3
 	{
 		// internal
 		TORRENT_UNEXPORT tracker_alert(aux::stack_allocator& alloc, torrent_handle const& h
-			, tcp::endpoint const& ep, string_view u);
+			, tcp::endpoint const& ep, string_view u, peer_route_context route = {});
 
 #if TORRENT_ABI_VERSION == 1
 		TORRENT_DEPRECATED static int const alert_type = 2;
@@ -208,6 +209,8 @@ TORRENT_VERSION_NAMESPACE_3
 
 		// endpoint of the listen interface being announced
 		aux::noexcept_movable<tcp::endpoint> local_endpoint;
+		// Zero identifies the ordinary session route.
+		peer_route_context const route;
 
 		// returns a 0-terminated string of the tracker's URL
 		char const* tracker_url() const;
@@ -543,7 +546,7 @@ TORRENT_VERSION_NAMESPACE_3
 		TORRENT_UNEXPORT tracker_error_alert(aux::stack_allocator& alloc
 			, torrent_handle const& h, tcp::endpoint const& ep
 			, int times, protocol_version v, string_view u
-			, operation_t op, error_code const& e, string_view m);
+			, operation_t op, error_code const& e, string_view m, peer_route_context route = {});
 
 		TORRENT_DEFINE_ALERT_PRIO(tracker_error_alert, 11, alert_priority::high)
 
@@ -588,7 +591,7 @@ TORRENT_VERSION_NAMESPACE_3
 		// internal
 		TORRENT_UNEXPORT tracker_warning_alert(aux::stack_allocator& alloc
 			, torrent_handle const& h, tcp::endpoint const& ep
-			, string_view u, protocol_version v, string_view m);
+			, string_view u, protocol_version v, string_view m, peer_route_context route = {});
 
 		TORRENT_DEFINE_ALERT(tracker_warning_alert, 12)
 
@@ -679,7 +682,7 @@ TORRENT_VERSION_NAMESPACE_3
 		// internal
 		TORRENT_UNEXPORT tracker_reply_alert(aux::stack_allocator& alloc
 			, torrent_handle const& h, tcp::endpoint const& ep
-			, int np, protocol_version v, string_view u);
+			, int np, protocol_version v, string_view u, peer_route_context route = {});
 
 		TORRENT_DEFINE_ALERT(tracker_reply_alert, 15)
 
@@ -722,7 +725,7 @@ TORRENT_VERSION_NAMESPACE_3
 		// internal
 		TORRENT_UNEXPORT tracker_announce_alert(aux::stack_allocator& alloc
 			, torrent_handle const& h, tcp::endpoint const& ep
-			, string_view u, protocol_version v, event_t e);
+			, string_view u, protocol_version v, event_t e, peer_route_context route = {});
 
 		TORRENT_DEFINE_ALERT(tracker_announce_alert, 17)
 
