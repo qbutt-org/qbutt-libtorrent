@@ -208,6 +208,11 @@ namespace aux {
 		, route(std::move(r))
 	{
 		TORRENT_UNUSED(completed);
+		// An unbound SOCKS endpoint still belongs to one address family.
+		// Preserve it in snapshots and alerts so IPv4 and IPv6 do not collide.
+		if (local_endpoint.address().is_unspecified())
+			local_endpoint.address(route->family == route_family::ipv6
+				? address(address_v6::any()) : address(address_v4::any()));
 	}
 
 	announce_entry::announce_entry(string_view u)
