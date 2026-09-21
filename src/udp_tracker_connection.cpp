@@ -106,7 +106,10 @@ namespace libtorrent {
 		auto const proxy = bind_socket().get()->udp_sock->sock.get_proxy_settings();
 		int const proxy_type = proxy.type;
 
+		// Managed numeric targets retain their address family and pass through
+		// the normal reachability and IP filters without a DNS lookup.
 		if (proxy.proxy_hostnames
+			&& (bind_socket().route_context().path_id == 0 || !aux::is_ip_address(hostname))
 			&& (proxy_type == settings_pack::socks5
 				|| proxy_type == settings_pack::socks5_pw))
 		{

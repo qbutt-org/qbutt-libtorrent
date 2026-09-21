@@ -3021,12 +3021,12 @@ namespace {
 		TORRENT_UNUSED(url);
 #endif
 		bool const udp = url.compare(0, 6, "udp://") == 0;
+		error_code url_error;
+		auto const components = parse_url_components(url, url_error);
+		error_code address_error;
+		address const numeric = make_address(std::get<2>(components), address_error);
 		if (tor.managed_routes() && !udp)
 		{
-			error_code url_error;
-			auto const components = parse_url_components(url, url_error);
-			error_code address_error;
-			address const numeric = make_address(std::get<2>(components), address_error);
 			std::size_t valid_endpoints = 0;
 			for (auto const& route : tor.route_policy().routes)
 			{
@@ -3071,6 +3071,8 @@ namespace {
 			if (!tor.allows_discovery_socket(s)) return;
 			if (s.is_ssl() != is_ssl || !s.supports_tracker(udp))
 				return;
+			if (tor.managed_routes() && !url_error && !address_error
+				&& !s.can_route(numeric)) return;
 			for (auto& aep : aeps)
 			{
 				if (aep.socket != s) continue;
