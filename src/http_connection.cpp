@@ -139,6 +139,8 @@ void http_connection::get(std::string const& url, time_duration timeout
 
 	int default_port = protocol == "https" ? 443 : 80;
 	if (port == -1) port = default_port;
+	std::string const host_header = hostname.find(':') == std::string::npos
+		? hostname : '[' + hostname + ']';
 
 	// keep ourselves alive even if the callback function
 	// deletes this object
@@ -188,7 +190,7 @@ void http_connection::get(std::string const& url, time_duration timeout
 			request << "Proxy-Authorization: Basic " << base64encode(
 				ps->username + ":" + ps->password) << "\r\n";
 
-		request << "Host: " << hostname;
+		request << "Host: " << host_header;
 		if (port != default_port) request << ":" << port << "\r\n";
 		else request << "\r\n";
 
@@ -197,7 +199,7 @@ void http_connection::get(std::string const& url, time_duration timeout
 	}
 	else
 	{
-		request << "GET " << path << " HTTP/1.1\r\nHost: " << hostname;
+		request << "GET " << path << " HTTP/1.1\r\nHost: " << host_header;
 		if (port != default_port) request << ":" << port << "\r\n";
 		else request << "\r\n";
 	}
