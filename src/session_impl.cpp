@@ -1303,7 +1303,12 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		if (std::any_of(m_trusted_inbound_routes.begin(), m_trusted_inbound_routes.end()
 			, [&](trusted_inbound_route const& r)
 			{ return r.context == context && r.public_endpoint == peer_endpoint; }))
+		{
+			if (m_alerts.should_post<peer_route_alert>())
+				m_alerts.emplace_alert<peer_route_alert>(torrent_handle(), peer_endpoint
+					, peer_id{}, context, operation_t::connect, errors::self_connection, 0, 0);
 			return errors::self_connection;
+		}
 		if (std::all_of(token.begin(), token.end(), [](unsigned char const c) { return c == 0; }))
 			return boost::asio::error::invalid_argument;
 		if (m_trusted_inbound_attempts.size() == 64)
@@ -3721,8 +3726,15 @@ namespace {
 			if ((*socket)->route)
 			{
 				auto const& route = *(*socket)->route;
-				if (endp.address().is_v4() != (route.family == route_family::ipv4)
-					|| endp == route.public_endpoint) return;
+				if (endp.address().is_v4() != (route.family == route_family::ipv4)) return;
+				if (endp == route.public_endpoint)
+				{
+					if (m_alerts.should_post<peer_route_alert>())
+						m_alerts.emplace_alert<peer_route_alert>(torrent_handle(), endp
+							, peer_id{}, route.route.context, operation_t::connect
+							, errors::self_connection, 0, 0);
+					return;
+				}
 				incoming_connection(std::move(s), endp, route.route.context, route.route.type);
 				return;
 			}
