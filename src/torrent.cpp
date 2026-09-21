@@ -7878,6 +7878,19 @@ namespace {
 			return peer_connect_result::rejected;
 		}
 
+		// A leased public endpoint belongs to this session regardless of the
+		// selected path. Reject it before uTP can loop into its own socket or
+		// the gateway turns the attempt into a misleading transport timeout.
+		if (managed_routes() && std::any_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+			, [&](network_route const& r) { return r.public_endpoint == a; }))
+		{
+			ban_peer(peerinfo);
+			if (alerts().should_post<peer_route_alert>())
+				alerts().emplace_alert<peer_route_alert>(get_handle(), a, peer_id{}
+					, route.context, operation_t::connect, errors::self_connection, 0, 0);
+			return peer_connect_result::rejected;
+		}
+
 		aux::proxy_settings connection_proxy;
 		if (route.type == peer_route::type_t::session_default)
 			connection_proxy = m_ses.proxy();
