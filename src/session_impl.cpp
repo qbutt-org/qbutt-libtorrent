@@ -291,12 +291,16 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 				return ep.ssl == sock->ssl
 					&& ep.port == sock->original_port
 					&& ep.device == sock->device
-					&& ep.flags == sock->flags
+					// An explicit address can reuse the same socket after a
+					// wildcard listen was expanded to that address.
+					&& (ep.flags & ~listen_socket_t::was_expanded)
+						== (sock->flags & ~listen_socket_t::was_expanded)
 					&& ep.addr == sock->local_endpoint.address();
 			});
 
 			if (match != eps.end())
 			{
+				sock->flags = match->flags;
 				// remove the matched endpoint so that another socket can't match it
 				// this also signals to the caller that it doesn't need to create a
 				// socket for the endpoint
