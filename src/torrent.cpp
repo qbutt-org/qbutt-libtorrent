@@ -11618,6 +11618,29 @@ namespace {
 		return true;
 	}
 
+	void torrent::prioritize_alternate_route(tcp::endpoint const& endpoint
+		, peer_route_context const failed_route)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (!managed_routes() || !valid_metadata() || torrent_file().priv() || !want_peers()
+			|| !allows_route(failed_route, endpoint.address().is_v4()
+				? route_family::ipv4 : route_family::ipv6))
+			return;
+
+		if (std::none_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+			, [&](network_route const& route)
+			{
+				return route.binding.context != failed_route
+					&& (route.family == route_family::ipv4) == endpoint.address().is_v4();
+			}))
+			return;
+
+		auto const range = find_peers(endpoint.address());
+		auto const peer = std::find_if(range.first, range.second
+			, [&](torrent_peer const* candidate) { return candidate->ip() == endpoint; });
+		if (peer != range.second) m_peer_list->prioritize_connect_candidate(*peer);
+	}
+
 	torrent_peer* torrent::add_peer(tcp::endpoint const& adr
 		, peer_source_flags_t const source, pex_flags_t flags)
 	{

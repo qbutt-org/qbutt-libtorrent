@@ -186,6 +186,7 @@ namespace libtorrent {
 		}
 
 		torrent_peer* connect_one_peer(int session_time, torrent_state* state);
+		bool prioritize_connect_candidate(torrent_peer* peer);
 
 		bool has_peer(torrent_peer const* p) const;
 

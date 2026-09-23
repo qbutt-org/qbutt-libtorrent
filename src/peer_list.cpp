@@ -1270,6 +1270,21 @@ namespace libtorrent {
 		return p;
 	}
 
+	bool peer_list::prioritize_connect_candidate(torrent_peer* peer)
+	{
+		TORRENT_ASSERT(is_single_thread());
+		INVARIANT_CHECK;
+		if (!peer || !is_connect_candidate(*peer)) return false;
+
+		// The failed connection belonged to a route, not necessarily to this
+		// peer. Give the ordinary connection scheduler one immediate candidate.
+		peer->last_connected = 0;
+		auto const i = std::find(m_candidate_cache.begin(), m_candidate_cache.end(), peer);
+		if (i != m_candidate_cache.end()) m_candidate_cache.erase(i);
+		m_candidate_cache.insert(m_candidate_cache.begin(), peer);
+		return true;
+	}
+
 	// this is called whenever a peer connection is closed
 	void peer_list::connection_closed(const peer_connection_interface& c
 		, int session_time, torrent_state* state)

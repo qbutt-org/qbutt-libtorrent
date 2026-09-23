@@ -767,6 +767,7 @@ namespace libtorrent {
 		void update_gauge();
 
 		bool try_connect_peer();
+		void prioritize_alternate_route(tcp::endpoint const& peer, peer_route_context failed_route);
 		torrent_peer* add_peer(tcp::endpoint const& adr
 			, peer_source_flags_t source, pex_flags_t flags = {});
 		bool ban_peer(torrent_peer* tp);

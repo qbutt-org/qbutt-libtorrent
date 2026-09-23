@@ -4255,7 +4255,18 @@ namespace libtorrent {
 				|| !m_settings.get_bool(settings_pack::enable_outgoing_tcp)
 				|| e == boost::asio::error::operation_aborted)
 			{
+				bool const alternate = t && t->managed_routes() && t->allows_peer_route(*this)
+					&& e != boost::asio::error::operation_aborted;
+				std::weak_ptr<torrent> weak_t = t;
+				tcp::endpoint const endpoint = m_remote;
+				peer_route_context const failed_route = m_route;
 				disconnect(e, operation_t::connect, normal);
+				if (alternate)
+					post(m_ios, [weak_t, endpoint, failed_route]()
+					{
+						if (auto tor = weak_t.lock())
+							tor->prioritize_alternate_route(endpoint, failed_route);
+					});
 				return;
 			}
 			auto& failed_routes = m_peer_info->failed_utp_routes;
