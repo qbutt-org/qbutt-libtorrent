@@ -51,7 +51,9 @@ namespace libtorrent { namespace aux {
 	bool listen_socket_handle::is_read_only_dht() const
 	{
 		auto s = m_sock.lock();
-		return s && s->route && s->route->public_endpoint.port() == 0;
+		return s && s->route && s->route->public_endpoint.port() == 0
+			&& (s->route->route.type != peer_route::type_t::native
+				|| s->route_state != udp_route_state::ready);
 	}
 
 	tcp::endpoint listen_socket_handle::get_public_endpoint() const
@@ -110,6 +112,12 @@ namespace libtorrent { namespace aux {
 	{
 		auto s = m_sock.lock();
 		return s && s->route ? s->route->route.context : peer_route_context{};
+	}
+
+	bool listen_socket_handle::is_native_route() const
+	{
+		auto s = m_sock.lock();
+		return s && s->route && s->route->route.type == peer_route::type_t::native;
 	}
 
 	bool listen_socket_handle::supports_tracker(bool const udp) const

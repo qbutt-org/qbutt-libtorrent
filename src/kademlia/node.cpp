@@ -456,13 +456,21 @@ void node::announce(sha1_hash const& info_hash, int listen_port, announce_flags_
 	auto effective_flags = flags;
 	if (m_sock.route_context().path_id != 0)
 	{
-		auto const endpoint = m_sock.get_public_endpoint();
-		if (endpoint.address().is_unspecified() || endpoint.port() == 0)
+		if (m_sock.is_native_route())
+			listen_port = m_observer ? m_observer->get_listen_port(
+				(flags & announce::ssl_torrent) ? aux::transport::ssl : aux::transport::plaintext
+				, m_sock) : 0;
+		else
+		{
+			auto const endpoint = m_sock.get_public_endpoint();
+			if (!endpoint.address().is_unspecified()) listen_port = endpoint.port();
+			else listen_port = 0;
+		}
+		if (listen_port == 0)
 		{
 			get_peers(info_hash, std::move(f), {}, flags, std::move(operation));
 			return;
 		}
-		listen_port = endpoint.port();
 		effective_flags &= ~announce::implied_port;
 	}
 #ifndef TORRENT_DISABLE_LOGGING

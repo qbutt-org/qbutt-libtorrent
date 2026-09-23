@@ -453,9 +453,12 @@ namespace aux {
 			void on_accept_connection(true_tcp_socket s, error_code const&
 				, std::weak_ptr<tcp::acceptor>, transport);
 
-			void incoming_connection(socket_type);
+			void incoming_connection(socket_type, peer_route_context native_route = {}
+				, bool route_stamped = false);
 			void incoming_connection(socket_type, tcp::endpoint peer_endpoint
 				, peer_route_context context, peer_route::type_t route_type);
+			peer_route_context native_inbound_route(address const& local_address) const;
+			std::uint16_t native_inbound_port(peer_route_context, address const&, transport) const;
 
 			std::weak_ptr<torrent> find_torrent(info_hash_t const&) const override;
 #if TORRENT_ABI_VERSION == 1
@@ -1102,7 +1105,8 @@ namespace aux {
 #endif
 #ifdef TORRENT_SSL_PEERS
 			void on_incoming_utp_ssl(socket_type s);
-			void ssl_handshake(error_code const& ec, socket_type* s);
+			void ssl_handshake(error_code const& ec, socket_type* s
+				, peer_route_context native_route = {}, bool route_stamped = false);
 #endif
 
 			// round-robin index into m_outgoing_interfaces

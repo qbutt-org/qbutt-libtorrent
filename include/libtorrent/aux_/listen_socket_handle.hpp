@@ -67,6 +67,7 @@ namespace libtorrent { namespace aux {
 		udp::endpoint get_udp_endpoint() const;
 		bool can_route(address const&) const;
 		peer_route_context route_context() const;
+		bool is_native_route() const;
 		bool supports_tracker(bool udp) const;
 		bool is_read_only_dht() const;
 

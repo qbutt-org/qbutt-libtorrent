@@ -1124,7 +1124,20 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		}
 		catch (...) { return boost::asio::error::invalid_argument; }
 #endif
+		bool const was_managed = bool(m_torrent_route_policy_selector);
 		m_torrent_route_policy_selector = std::move(selector);
+#ifndef TORRENT_DISABLE_DHT
+		if (m_dht && was_managed != bool(m_torrent_route_policy_selector))
+		{
+			for (auto const& socket : m_listen_sockets)
+			{
+				if (socket->route || socket->ssl == transport::ssl
+					|| (socket->flags & listen_socket_t::local_network)) continue;
+				if (m_torrent_route_policy_selector) m_dht->delete_socket(socket);
+				else m_dht->new_socket(socket, m_dht_router_nodes);
+			}
+		}
+#endif
 		std::vector<std::shared_ptr<torrent>> changed;
 		for (auto& p : policies)
 			if (p.first->apply_route_policy(std::move(p.second))) changed.push_back(p.first);
@@ -2004,11 +2017,23 @@ namespace {
 		if (req.route_operation
 			&& req.route_operation->route.binding.context.path_id != 0)
 		{
-			auto const endpoint = req.route_operation->route.public_endpoint;
-			req.listen_port = make_announce_port(endpoint.port());
+			auto const& route = req.route_operation->route;
+			auto const endpoint = route.public_endpoint;
+			if (route.binding.type == peer_route::type_t::native)
+			{
+				req.listen_port = make_announce_port(native_inbound_port(route.binding.context
+					, route.binding.local_endpoint.address()
+#ifdef TORRENT_SSL_PEERS
+					, use_ssl ? transport::ssl : transport::plaintext));
+#else
+					, transport::plaintext));
+#endif
+			}
+			else req.listen_port = make_announce_port(endpoint.port());
 			req.ipv4.clear();
 			req.ipv6.clear();
-			if (!m_settings.get_bool(settings_pack::anonymous_mode)
+			if (route.binding.type != peer_route::type_t::native
+				&& !m_settings.get_bool(settings_pack::anonymous_mode)
 				&& !endpoint.address().is_unspecified())
 			{
 				if (endpoint.address().is_v4()) req.ipv4.push_back(endpoint.address().to_v4());
@@ -2905,7 +2930,7 @@ namespace {
 				m_listen_sockets.emplace_back(s);
 
 #ifndef TORRENT_DISABLE_DHT
-				if (m_dht
+				if (m_dht && !m_torrent_route_policy_selector
 					&& s->ssl != transport::ssl
 					&& !(s->flags & listen_socket_t::local_network))
 				{
@@ -3332,9 +3357,11 @@ namespace {
 		auto owner = ls.lock();
 		if (!owner || (owner->route && owner->route_state != udp_route_state::ready)) return;
 #ifndef TORRENT_DISABLE_DHT
-		bool const receive_dht = !owner->route || owner->route->enable_dht;
+		bool const receive_dht = owner->route
+			? owner->route->enable_dht : !m_torrent_route_policy_selector;
 #endif
-		bool const receive_trackers = !owner->route || owner->route->enable_trackers;
+		bool const receive_trackers = owner->route
+			? owner->route->enable_trackers : !m_torrent_route_policy_selector;
 
 		struct utp_socket_manager& mgr =
 #ifdef TORRENT_SSL_PEERS
@@ -3585,6 +3612,8 @@ namespace {
 		auto listen = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
 			, [&listener](std::shared_ptr<listen_socket_t> const& l)
 		{ return l->sock == listener; });
+		peer_route_context const native_route = listen != m_listen_sockets.end()
+			? native_inbound_route((*listen)->local_endpoint.address()) : peer_route_context{};
 		if (listen != m_listen_sockets.end())
 			(*listen)->incoming_connection = true;
 
@@ -3623,12 +3652,13 @@ namespace {
 			// after the handshake is done
 			ADD_OUTSTANDING_ASYNC("session_impl::ssl_handshake");
 			boost::get<ssl_stream<tcp::socket>>(**iter).async_accept_handshake(
-				[this, sock] (error_code const& err) { ssl_handshake(err, sock); });
+				[this, sock, native_route] (error_code const& err)
+				{ ssl_handshake(err, sock, native_route, true); });
 		}
 		else
 #endif
 		{
-			incoming_connection(std::move(c));
+			incoming_connection(std::move(c), native_route, true);
 		}
 	}
 
@@ -3637,6 +3667,15 @@ namespace {
 	void session_impl::on_incoming_utp_ssl(socket_type s)
 	{
 		TORRENT_ASSERT(is_ssl(s));
+		peer_route_context native_route;
+		if (auto const owner = boost::get<ssl_stream<utp_stream>>(s)
+			.next_layer().get_impl()->m_sock.lock())
+		{
+			auto const socket = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
+				, [&](auto const& candidate) { return candidate.get() == owner.get(); });
+			if (socket != m_listen_sockets.end() && !(*socket)->route)
+				native_route = native_inbound_route((*socket)->local_endpoint.address());
+		}
 
 		// save the socket so we can cancel the handshake
 
@@ -3648,7 +3687,8 @@ namespace {
 		// after the handshake is done
 		ADD_OUTSTANDING_ASYNC("session_impl::ssl_handshake");
 		boost::get<ssl_stream<utp_stream>>(**iter).async_accept_handshake(
-			[this, sock] (error_code const& err) { ssl_handshake(err, sock); });
+			[this, sock, native_route] (error_code const& err)
+			{ ssl_handshake(err, sock, native_route, true); });
 	}
 
 	// to test SSL connections, one can use this openssl command template:
@@ -3657,7 +3697,8 @@ namespace {
 	//   -CAfile <torrent-cert>.pem  -debug -connect 127.0.0.1:4433 -tls1
 	//   -servername <hex-encoded-info-hash>
 
-	void session_impl::ssl_handshake(error_code const& ec, socket_type* sock)
+	void session_impl::ssl_handshake(error_code const& ec, socket_type* sock
+		, peer_route_context const native_route, bool const route_stamped)
 	{
 		COMPLETE_ASYNC("session_impl::ssl_handshake");
 
@@ -3693,13 +3734,59 @@ namespace {
 			return;
 		}
 
-		incoming_connection(std::move(s));
+		incoming_connection(std::move(s), native_route, route_stamped);
 	}
 
 #endif // TORRENT_SSL_PEERS
 
-	void session_impl::incoming_connection(socket_type s)
+	peer_route_context session_impl::native_inbound_route(address const& local_address) const
 	{
+		if (local_address.is_unspecified()) return {};
+		peer_route_context context;
+		for (auto const& socket : m_listen_sockets)
+		{
+			if (!socket->route || socket->ssl == transport::ssl
+				|| socket->route->route.type != peer_route::type_t::native
+				|| socket->route->route.local_endpoint.address() != local_address)
+				continue;
+			if (context != peer_route_context{} && context != socket->route->route.context)
+				return {};
+			context = socket->route->route.context;
+		}
+		return context;
+	}
+
+	std::uint16_t session_impl::native_inbound_port(peer_route_context const context
+		, address const& local_address, transport const ssl) const
+	{
+		if (local_address.is_unspecified()
+			|| native_inbound_route(local_address) != context) return 0;
+		listen_socket_t* listener = nullptr;
+		for (auto const& socket : m_listen_sockets)
+		{
+			if (socket->route || socket->ssl != ssl
+				|| socket->local_endpoint.address() != local_address) continue;
+			if (listener) return 0;
+			listener = socket.get();
+		}
+		if (!listener) return 0;
+		if (listener->sock && m_settings.get_bool(settings_pack::enable_incoming_tcp))
+			return std::uint16_t(listener->tcp_external_port());
+		if (listener->udp_sock && m_settings.get_bool(settings_pack::enable_incoming_utp))
+			return std::uint16_t(listener->udp_external_port());
+		return 0;
+	}
+
+	void session_impl::incoming_connection(socket_type s, peer_route_context native_route
+		, bool const route_stamped)
+	{
+		if (route_stamped && native_route != peer_route_context{})
+		{
+			error_code local_error;
+			auto const local = s.local_endpoint(local_error);
+			if (local_error || native_inbound_route(local.address()) != native_route)
+				return;
+		}
 		error_code ec;
 		tcp::endpoint const endp = s.remote_endpoint(ec);
 		if (ec)
@@ -3732,8 +3819,14 @@ namespace {
 				incoming_connection(std::move(s), endp, route.route.context, route.route.type);
 				return;
 			}
+			if (!route_stamped)
+				native_route = native_inbound_route((*socket)->local_endpoint.address());
 		}
-		incoming_connection(std::move(s), endp, {}, peer_route::type_t::session_default);
+		if (native_route == peer_route_context{} && m_torrent_route_policy_selector)
+			return;
+		incoming_connection(std::move(s), endp, native_route
+			, native_route == peer_route_context{}
+				? peer_route::type_t::session_default : peer_route::type_t::native);
 	}
 
 	void session_impl::incoming_connection(socket_type s, tcp::endpoint const endp
@@ -3744,8 +3837,8 @@ namespace {
 			== (context == peer_route_context{}));
 		TORRENT_ASSERT(route_type == peer_route::type_t::session_default
 			|| route_type == peer_route::type_t::trusted_inbound
-			|| (is_utp(s) && (route_type == peer_route::type_t::socks5
-				|| route_type == peer_route::type_t::native)));
+			|| route_type == peer_route::type_t::native
+			|| (is_utp(s) && route_type == peer_route::type_t::socks5));
 		bool const trusted_inbound = route_type == peer_route::type_t::trusted_inbound;
 
 		if (m_abort)
@@ -6387,7 +6480,13 @@ namespace {
 		auto socket = s.get();
 		// These contexts own outgoing UDP only. Their loopback/physical bind
 		// port is not evidence of a public incoming peer listener.
-		if (socket->route) return 0;
+		if (socket->route)
+		{
+			if (socket->route->route.type != peer_route::type_t::native
+				|| socket->route_state != udp_route_state::ready) return 0;
+			return native_inbound_port(socket->route->route.context
+				, socket->route->route.local_endpoint.address(), ssl);
+		}
 		if (socket->ssl != ssl)
 		{
 			auto alt_socket = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
@@ -6698,7 +6797,8 @@ namespace {
 		for (auto& s : m_listen_sockets)
 		{
 			if (s->ssl != transport::ssl
-				&& (!s->route || (s->route->enable_dht && s->route_state == udp_route_state::ready))
+				&& (s->route ? (s->route->enable_dht && s->route_state == udp_route_state::ready)
+					: !m_torrent_route_policy_selector)
 				&& !(s->flags & listen_socket_t::local_network))
 			{
 				m_dht->new_socket(s);
