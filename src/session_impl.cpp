@@ -2606,7 +2606,13 @@ namespace {
 			ret->udp_sock->sock.bind(udp_bind_ep, ec);
 		}
 
-		if (ec == error_code(error::address_in_use)
+		// Windows may report WSAEACCES when the TCP-selected ephemeral port
+		// already belongs to an exclusive UDP listener.
+		if ((ec == error_code(error::address_in_use)
+#ifdef TORRENT_WINDOWS
+			|| (lep.port == 0 && ec == error_code(error::access_denied))
+#endif
+			)
 			&& m_settings.get_bool(settings_pack::listen_system_port_fallback)
 			&& udp_bind_ep.port() != 0)
 		{
