@@ -187,7 +187,9 @@ namespace aux {
 		bool accept_incoming_utp() const override
 		{
 			return !route || (route_state == udp_route_state::ready
-				&& route->enable_utp && route->public_endpoint.port() != 0);
+				&& route->enable_utp && (route->public_endpoint.port() != 0
+					|| (route->route.type == peer_route::type_t::native && !route->ssl
+						&& (flags & accept_incoming))));
 		}
 		bool use_socks5() const override
 		{

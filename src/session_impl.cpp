@@ -284,7 +284,9 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 		return std::partition(sockets.begin(), sockets.end()
 			, [&eps](std::shared_ptr<listen_socket_t> const& sock)
 		{
-			if (sock->route) return true;
+			// A Native route may live on the ordinary physical listener. Only
+			// dedicated UDP route sockets bypass listen-interface reconciliation.
+			if (sock->route && !(sock->flags & listen_socket_t::accept_incoming)) return true;
 			auto match = std::find_if(eps.begin(), eps.end()
 				, [&sock](listen_endpoint_t const& ep)
 			{
@@ -295,7 +297,8 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
 					// wildcard listen was expanded to that address.
 					&& (ep.flags & ~listen_socket_t::was_expanded)
 						== (sock->flags & ~listen_socket_t::was_expanded)
-					&& ep.addr == sock->local_endpoint.address();
+					&& ep.addr == sock->local_endpoint.address()
+					&& (!sock->udp_sock || !sock->udp_sock->sock.is_closed());
 			});
 
 			if (match != eps.end())
@@ -1508,6 +1511,26 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return boost::asio::error::operation_aborted;
 		if (routes.size() > 64) return boost::asio::error::invalid_argument;
+		// Plain Native discovery and uTP use the physical listener's one UDP
+		// reader and source port. SSL routes stay outgoing-only on their own
+		// sockets; there may be no physical SSL listener to share.
+		auto native_listener = [this](udp_route const& descriptor)
+		{
+			std::shared_ptr<listen_socket_t> match;
+			for (auto const& s : m_listen_sockets)
+			{
+				if (!(s->flags & listen_socket_t::accept_incoming)
+					|| s->ssl != transport::plaintext
+					|| s->local_endpoint.address() != descriptor.route.local_endpoint.address()
+					|| !s->udp_sock || s->udp_sock->sock.is_closed()
+					|| s->udp_sock->sock.local_port() == 0
+					|| (s->route && s->route->route.type != peer_route::type_t::native))
+					continue;
+				if (match) return std::shared_ptr<listen_socket_t>{};
+				match = s;
+			}
+			return match;
+		};
 		for (auto i = routes.begin(); i != routes.end(); ++i)
 		{
 			auto const& r = i->route;
@@ -1534,6 +1557,9 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			else if (r.local_endpoint.address().is_unspecified()
 				|| r.local_endpoint.address().is_v4() != ipv4)
 				return boost::asio::error::invalid_argument;
+			if (r.type == peer_route::type_t::native && !i->ssl
+				&& (!m_torrent_route_policy_selector || !native_listener(*i)))
+				return boost::asio::error::network_unreachable;
 #ifndef TORRENT_WINDOWS
 			if (r.native_interface_index != 0) return boost::asio::error::operation_not_supported;
 #endif
@@ -1542,6 +1568,9 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 #endif
 			for (auto j = routes.begin(); j != i; ++j)
 				if (same_udp_identity(*i, *j)
+					|| (r.type == peer_route::type_t::native && !i->ssl
+						&& j->route.type == peer_route::type_t::native && !j->ssl
+						&& r.local_endpoint.address() == j->route.local_endpoint.address())
 					|| (i->public_endpoint.port() != 0 && i->public_endpoint == j->public_endpoint
 						&& i->ssl != j->ssl))
 					return boost::asio::error::invalid_argument;
@@ -1564,13 +1593,61 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			auto const wanted = std::find_if(routes.begin(), routes.end()
 				, [&](udp_route const& r) { return same_udp_identity(r, *(*i)->route); });
 			if (wanted != routes.end()) { routes.erase(wanted); ++i; continue; }
+#ifdef TORRENT_WINDOWS
+			if ((*i)->route->route.type == peer_route::type_t::native
+				&& ((*i)->flags & listen_socket_t::accept_incoming)
+				&& (*i)->route->route.native_interface_index != 0)
+			{
+				error_code ec;
+				(*i)->udp_sock->sock.set_option(native_route_interface(0
+					, (*i)->local_endpoint.address().is_v6()), ec);
+				// Ordinary listeners start with the system interface choice. If
+				// restoring that choice fails, retire this UDP socket as well.
+				if (ec) (*i)->udp_sock->sock.close();
+			}
+#endif
 			close_udp_route(*i, udp_route_state::retired
 				, boost::asio::error::operation_aborted, operation_t::connect);
-			i = m_listen_sockets.erase(i);
+			if ((*i)->route->route.type == peer_route::type_t::native
+				&& ((*i)->flags & listen_socket_t::accept_incoming))
+			{
+				(*i)->route.reset();
+				(*i)->route_state = udp_route_state::pending;
+				++i;
+			}
+			else i = m_listen_sockets.erase(i);
 		}
 
 		for (auto& descriptor : routes)
 		{
+			if (descriptor.route.type == peer_route::type_t::native && !descriptor.ssl)
+			{
+				auto s = native_listener(descriptor);
+				if (!s || s->route) return boost::asio::error::network_unreachable;
+#ifdef TORRENT_WINDOWS
+				if (descriptor.route.native_interface_index != 0)
+				{
+					error_code ec;
+					s->udp_sock->sock.set_option(native_route_interface(
+						descriptor.route.native_interface_index, s->local_endpoint.address().is_v6()), ec);
+					if (ec)
+					{
+						s->udp_sock->sock.close();
+						return ec;
+					}
+				}
+#endif
+				s->route = std::make_unique<udp_route const>(std::move(descriptor));
+				s->route_state = udp_route_state::ready;
+				if (m_alerts.should_post<udp_route_alert>())
+					m_alerts.emplace_alert<udp_route_alert>(s->route->route.context, s->route->family
+						, false, s->route_state, operation_t::sock_bind, error_code{});
+#ifndef TORRENT_DISABLE_DHT
+				if (m_dht && s->route->enable_dht) m_dht->new_socket(s);
+#endif
+				for (auto const& t : m_torrents) t->announce_with_tracker();
+				continue;
+			}
 			auto s = std::make_shared<listen_socket_t>();
 			s->route = std::make_unique<udp_route const>(std::move(descriptor));
 			auto const& r = s->route->route;
@@ -1655,7 +1732,10 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	{
 		if (s->route_state == udp_route_state::retired) return;
 		s->route_state = state;
-		s->udp_sock->sock.close();
+		if (state != udp_route_state::retired
+			|| s->route->route.type != peer_route::type_t::native
+			|| !(s->flags & listen_socket_t::accept_incoming))
+			s->udp_sock->sock.close();
 		for (auto i = m_connections.begin(); i != m_connections.end();)
 		{
 			auto const c = *i++;
@@ -2887,13 +2967,22 @@ namespace {
 		}
 
 		auto remove_iter = partition_listen_sockets(eps, m_listen_sockets);
+		std::vector<udp_route> native_rebind;
 
 		while (remove_iter != m_listen_sockets.end())
 		{
+			if ((*remove_iter)->route)
+			{
+				native_rebind.push_back(*(*remove_iter)->route);
+				close_udp_route(*remove_iter, udp_route_state::retired
+					, boost::asio::error::operation_aborted, operation_t::sock_bind);
+			}
+			else
+			{
 #ifndef TORRENT_DISABLE_DHT
-			if (m_dht)
-				m_dht->delete_socket(*remove_iter);
+				if (m_dht) m_dht->delete_socket(*remove_iter);
 #endif
+			}
 
 #ifndef TORRENT_DISABLE_LOGGING
 			if (should_log())
@@ -2963,6 +3052,37 @@ namespace {
 #endif // TORRENT_DISABLE_LOGGING
 		}
 #endif // BOOST_NO_EXCEPTIONS
+
+		if (!native_rebind.empty())
+		{
+			std::vector<udp_route> routes;
+			for (auto const& s : m_listen_sockets)
+				if (s->route) routes.push_back(*s->route);
+			for (auto& descriptor : native_rebind)
+			{
+				auto const found = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
+					, [&](std::shared_ptr<listen_socket_t> const& s)
+					{
+						return (s->flags & listen_socket_t::accept_incoming)
+							&& s->ssl == transport::plaintext
+							&& s->local_endpoint.address() == descriptor.route.local_endpoint.address()
+							&& s->udp_sock && !s->udp_sock->sock.is_closed();
+					});
+				if (found != m_listen_sockets.end()) routes.push_back(descriptor);
+				else if (m_alerts.should_post<udp_route_alert>())
+					m_alerts.emplace_alert<udp_route_alert>(descriptor.route.context, descriptor.family
+						, descriptor.ssl, udp_route_state::failed, operation_t::sock_bind
+						, boost::asio::error::network_unreachable);
+			}
+			if (auto const route_error = set_udp_routes(std::move(routes)))
+			{
+				for (auto const& descriptor : native_rebind)
+					if (m_alerts.should_post<udp_route_alert>())
+						m_alerts.emplace_alert<udp_route_alert>(descriptor.route.context
+							, descriptor.family, descriptor.ssl, udp_route_state::failed
+							, operation_t::sock_bind, route_error);
+			}
+		}
 
 		if (m_listen_sockets.empty())
 		{
@@ -3749,7 +3869,8 @@ namespace {
 		peer_route_context context;
 		for (auto const& socket : m_listen_sockets)
 		{
-			if (!socket->route || socket->ssl == transport::ssl
+			if (!socket->route || socket->route_state != udp_route_state::ready
+				|| socket->ssl == transport::ssl
 				|| socket->route->route.type != peer_route::type_t::native
 				|| socket->route->route.local_endpoint.address() != local_address)
 				continue;
@@ -3768,8 +3889,12 @@ namespace {
 		listen_socket_t* listener = nullptr;
 		for (auto const& socket : m_listen_sockets)
 		{
-			if (socket->route || socket->ssl != ssl
+			if (!(socket->flags & listen_socket_t::accept_incoming)
+				|| socket->ssl != ssl
 				|| socket->local_endpoint.address() != local_address) continue;
+			if (socket->route && (socket->route->route.type != peer_route::type_t::native
+				|| socket->route->route.context != context
+				|| socket->route_state != udp_route_state::ready)) continue;
 			if (listener) return 0;
 			listener = socket.get();
 		}
@@ -6563,7 +6688,7 @@ namespace {
 
 	void session_impl::start_natpmp(std::shared_ptr<aux::listen_socket_t> const& s)
 	{
-		if (s->route) return;
+		if (s->route && !(s->flags & listen_socket_t::accept_incoming)) return;
 		// don't create mappings for local IPv6 addresses
 		// they can't be reached from outside of the local network anyways
 		if (is_v6(s->local_endpoint) && is_local(s->local_endpoint.address()))
@@ -7791,7 +7916,7 @@ namespace {
 
 	void session_impl::start_upnp(std::shared_ptr<aux::listen_socket_t> const& s)
 	{
-		if (s->route) return;
+		if (s->route && !(s->flags & listen_socket_t::accept_incoming)) return;
 		// until we support SSDP over an IPv6 network (
 		// https://en.wikipedia.org/wiki/Simple_Service_Discovery_Protocol )
 		// there's no point in starting upnp on one.
