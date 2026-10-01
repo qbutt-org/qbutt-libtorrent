@@ -7900,7 +7900,8 @@ namespace {
 		{
 			// we're not looking for local peers when we're using a proxy. We
 			// want all traffic to go through the proxy
-			if (s->route || (s->flags & listen_socket_t::proxy)) continue;
+			if ((s->route && s->route->route.type != peer_route::type_t::native)
+			|| (s->flags & listen_socket_t::proxy)) continue;
 			if (s->lsd) continue;
 			s->lsd = std::make_shared<lsd>(m_io_context, *this, s->local_endpoint.address()
 				, s->netmask);

@@ -573,8 +573,12 @@ bool is_downloading_state(int const st)
 		// Explicitly supplied peers (source zero) and this torrent's trackers are
 		// allowed. Resume/discovery candidates do not prove private tracker scope.
 		if (torrent_file().priv()) return !source || bool(source & peer_info::tracker);
-		// LSD belongs to session interfaces, not the selected outgoing path.
-		return !(source & peer_info::lsd);
+		// LSD is local to the physical Native listener. A relay catalog
+		// must not retain its peers when the policy changes.
+		if (!(source & peer_info::lsd)) return true;
+		return !m_route_policy.routes.empty() && std::all_of(m_route_policy.routes.begin()
+			, m_route_policy.routes.end(), [](network_route const& route)
+			{ return route.binding.type == peer_route::type_t::native; });
 	}
 
 	std::shared_ptr<aux::network_operation> torrent::route_operation(
