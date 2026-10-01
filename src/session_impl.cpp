@@ -1028,6 +1028,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	void session_impl::set_peer_route_selector(peer_route_selector selector, peer_route_observer observer)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		m_policy_retry_armed = false;
 		m_peer_route_selector = std::move(selector);
 		m_peer_route_observer = std::move(observer);
 	}
@@ -1110,6 +1111,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	{
 		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return boost::asio::error::operation_aborted;
+		m_policy_retry_armed = false;
 		std::vector<std::pair<std::shared_ptr<torrent>, torrent_route_policy>> policies;
 #ifndef BOOST_NO_EXCEPTIONS
 		try
@@ -1164,6 +1166,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	{
 		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return;
+		m_policy_retry_armed = true;
 		for (auto const& t : m_torrents) t->retry_policy_peers();
 	}
 
@@ -1516,6 +1519,14 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 	error_code session_impl::set_udp_routes(std::vector<udp_route> routes)
 	{
 		TORRENT_ASSERT(is_single_thread());
+		// External catalog updates precede the caller's final readiness barrier.
+		m_policy_retry_armed = false;
+		return set_udp_routes_impl(std::move(routes));
+	}
+
+	error_code session_impl::set_udp_routes_impl(std::vector<udp_route> routes)
+	{
+		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return boost::asio::error::operation_aborted;
 		if (routes.size() > 64) return boost::asio::error::invalid_argument;
 		// Plain Native discovery and uTP use the physical listener's one UDP
@@ -1700,6 +1711,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 			}
 			else on_udp_route_state(s, {}, operation_t::connect);
 		}
+		if (m_policy_retry_armed) retry_policy_peers();
 		return {};
 	}
 
@@ -1732,6 +1744,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		if (m_dht && s->route->enable_dht) m_dht->new_socket(s);
 #endif
 		for (auto const& t : m_torrents) t->announce_with_tracker();
+		if (m_policy_retry_armed) retry_policy_peers();
 	}
 
 	void session_impl::close_udp_route(std::shared_ptr<listen_socket_t> const& s
@@ -2430,6 +2443,7 @@ namespace {
 		{
 			for (auto const& t : m_torrents)
 				t->update_want_peers();
+			if (m_policy_retry_armed) retry_policy_peers();
 		}
 	}
 
@@ -3081,7 +3095,7 @@ namespace {
 						, descriptor.ssl, udp_route_state::failed, operation_t::sock_bind
 						, boost::asio::error::network_unreachable);
 			}
-			if (auto const route_error = set_udp_routes(std::move(routes)))
+			if (auto const route_error = set_udp_routes_impl(std::move(routes)))
 			{
 				for (auto const& descriptor : native_rebind)
 					if (m_alerts.should_post<udp_route_alert>())

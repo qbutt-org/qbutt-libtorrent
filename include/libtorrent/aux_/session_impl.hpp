@@ -923,6 +923,8 @@ namespace aux {
 
 		private:
 
+			error_code set_udp_routes_impl(std::vector<udp_route> routes);
+
 			// return the settings value for int setting "n", if the value is
 			// negative, return INT_MAX
 			int get_int_setting(int n) const;
@@ -1051,6 +1053,8 @@ namespace aux {
 			peer_route_selector m_peer_route_selector;
 			torrent_route_policy_selector m_torrent_route_policy_selector;
 			peer_route_observer m_peer_route_observer;
+			// Re-arm only after the application finishes its route and proxy transition.
+			bool m_policy_retry_armed = false;
 			std::vector<trusted_inbound_route> m_trusted_inbound_routes;
 			std::vector<std::pair<std::uint64_t, std::uint64_t>> m_retired_trusted_inbound;
 			std::vector<std::shared_ptr<trusted_inbound_attempt>> m_trusted_inbound_attempts;

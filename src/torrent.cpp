@@ -657,6 +657,9 @@ bool is_downloading_state(int const st)
 	{
 		TORRENT_ASSERT(is_single_thread());
 		if (!m_peer_list) return;
+		bool const outgoing_tcp = settings().get_bool(settings_pack::enable_outgoing_tcp);
+		bool const outgoing_utp = settings().get_bool(settings_pack::enable_outgoing_utp);
+		if (!outgoing_tcp && !outgoing_utp) return;
 
 		bool scheduled = false;
 		for (auto const peer : *m_peer_list)
@@ -671,9 +674,14 @@ bool is_downloading_state(int const st)
 			{
 				auto const family = peer->address().is_v4()
 					? route_family::ipv4 : route_family::ipv6;
+				// A catalog route is not a uTP carrier until its UDP socket is ready.
 				if (std::none_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
 					, [&](network_route const& route)
-					{ return route.family == family && allows_route(route.binding.context, family); }))
+					{
+						return route.family == family && allows_route(route.binding.context, family)
+							&& (outgoing_tcp || (outgoing_utp && m_ses.has_udp_route(
+								route.binding.context, peer->address(), is_ssl_torrent(), route.binding.type)));
+					}))
 					continue;
 			}
 			scheduled |= m_peer_list->prioritize_connect_candidate(peer);
