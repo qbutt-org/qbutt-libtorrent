@@ -1160,6 +1160,13 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 		return {};
 	}
 
+	void session_impl::retry_policy_peers()
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (m_abort) return;
+		for (auto const& t : m_torrents) t->retry_policy_peers();
+	}
+
 	void session_impl::cancel_route_operations()
 	{
 		m_tracker_manager.abort_route_operations();

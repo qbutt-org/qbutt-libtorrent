@@ -122,6 +122,11 @@ namespace libtorrent {
 		// Forbidden operations and sockets are cancelled before return. An invalid
 		// replacement leaves the previous callback and policies intact.
 		error_code set_torrent_route_policy_selector(torrent_route_policy_selector selector);
+		// Schedule one ordinary reconnect for established peers retired by a route
+		// policy change, after the replacement network configuration is ready.
+		// This is a synchronous network-thread barrier; it does not bypass peer
+		// admission, bans, connection limits or the standard candidate scheduler.
+		void retry_policy_peers();
 		// Numeric bootstrap for one ready managed DHT owner. Never resolves names
 		// or adds the endpoint to a different route or family.
 		error_code add_dht_route_node(peer_route_context context, route_family family

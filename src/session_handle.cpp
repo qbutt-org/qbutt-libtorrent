@@ -102,6 +102,11 @@ namespace libtorrent {
 		return sync_call_ret<error_code>(&session_impl::set_torrent_route_policy_selector, std::move(selector));
 	}
 
+	void session_handle::retry_policy_peers()
+	{
+		sync_call(&session_impl::retry_policy_peers);
+	}
+
 	error_code session_handle::add_dht_route_node(peer_route_context context
 		, route_family family, udp::endpoint node, bool router)
 	{

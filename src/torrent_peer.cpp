@@ -179,6 +179,7 @@ namespace libtorrent {
 #endif
 		, on_parole(false)
 		, banned(false)
+		, policy_reconnect_pending(false)
 		, supports_utp(true) // assume peers support utp
 		, confirmed_supports_utp(false)
 		, supports_holepunch(false)

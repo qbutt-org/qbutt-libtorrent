@@ -207,6 +207,9 @@ namespace libtorrent {
 
 		// is set to true if this torrent_peer has been banned
 		bool banned:1;
+		// A connected peer was retired by route policy and may be scheduled once
+		// after the replacement route is ready.
+		bool policy_reconnect_pending:1;
 
 		// we think this torrent_peer supports uTP
 		bool supports_utp:1;

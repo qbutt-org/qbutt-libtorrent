@@ -753,6 +753,7 @@ namespace aux {
 			void set_peer_route_selector(peer_route_selector selector, peer_route_observer observer);
 			torrent_route_policy select_torrent_route_policy(torrent_route_request const&) const override;
 			error_code set_torrent_route_policy_selector(torrent_route_policy_selector selector);
+			void retry_policy_peers();
 			error_code validate_torrent_route_policy(torrent_route_policy const& policy) const;
 			void cancel_route_operations() override;
 			error_code add_dht_route_node(peer_route_context context, route_family family

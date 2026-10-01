@@ -1314,6 +1314,7 @@ namespace libtorrent {
 		TORRENT_ASSERT(p->connection == &c);
 		TORRENT_ASSERT(!is_connect_candidate(*p));
 
+		p->policy_reconnect_pending = false;
 		p->connection = nullptr;
 		p->optimistically_unchoked = false;
 

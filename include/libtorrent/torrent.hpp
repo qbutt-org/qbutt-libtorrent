@@ -391,6 +391,7 @@ namespace libtorrent {
 		bool allows_discovery_socket(aux::listen_socket_handle const& socket) const;
 		bool allows_peer_source(peer_source_flags_t source) const;
 		bool apply_route_policy(torrent_route_policy policy);
+		void retry_policy_peers();
 		void invalidate_route(peer_route_context context);
 		std::shared_ptr<aux::network_operation> route_operation(
 			aux::listen_socket_handle const& socket, aux::network_operation::kind_t kind);

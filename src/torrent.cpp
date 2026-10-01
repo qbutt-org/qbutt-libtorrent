@@ -625,10 +625,18 @@ bool is_downloading_state(int const st)
 			auto const peer = p->peer_info_struct();
 			if (allows_peer_route(*p)
 				&& (!peer || allows_peer_source(peer->peer_source()))) continue;
+			bool const established = peer && peer->connectable
+				&& !p->is_connecting() && !p->in_handshake() && !p->is_disconnecting()
+				&& allows_peer_source(peer->peer_source());
 			p->disconnect(boost::asio::error::operation_aborted
 				, operation_t::connect, peer_connection_interface::normal);
 			error_code ec;
 			p->get_socket().close(ec);
+			// disconnect() has already recorded the ordinary reconnect timestamp.
+			// The peer list owns this one-shot exception only while this same peer
+			// entry survives the policy retirement.
+			if (established && m_peer_list && m_peer_list->has_peer(peer))
+				peer->policy_reconnect_pending = true;
 		}
 		if (m_peer_list && managed_routes())
 		{
@@ -643,6 +651,39 @@ bool is_downloading_state(int const st)
 			if (web.route_operation && web.route_operation->aborted)
 				web.endpoints.clear();
 		return true;
+	}
+
+	void torrent::retry_policy_peers()
+	{
+		TORRENT_ASSERT(is_single_thread());
+		if (!m_peer_list) return;
+
+		bool scheduled = false;
+		for (auto const peer : *m_peer_list)
+		{
+			if (!peer->policy_reconnect_pending) continue;
+			if (peer->connection || !allows_peer_source(peer->peer_source()))
+			{
+				peer->policy_reconnect_pending = false;
+				continue;
+			}
+			if (managed_routes())
+			{
+				auto const family = peer->address().is_v4()
+					? route_family::ipv4 : route_family::ipv6;
+				if (std::none_of(m_route_policy.routes.begin(), m_route_policy.routes.end()
+					, [&](network_route const& route)
+					{ return route.family == family && allows_route(route.binding.context, family); }))
+					continue;
+			}
+			scheduled |= m_peer_list->prioritize_connect_candidate(peer);
+			peer->policy_reconnect_pending = false;
+		}
+		if (scheduled)
+		{
+			update_want_peers();
+			if (want_peers()) m_ses.prioritize_connections(shared_from_this());
+		}
 	}
 
 	void torrent::start()
@@ -7890,6 +7931,7 @@ namespace {
 					, route.context, operation_t::connect, errors::self_connection, 0, 0);
 			return peer_connect_result::rejected;
 		}
+		peerinfo->policy_reconnect_pending = false;
 
 		aux::proxy_settings connection_proxy;
 		if (route.type == peer_route::type_t::session_default)
@@ -8449,6 +8491,7 @@ namespace {
 			return false;
 		}
 		peers_erased(st.erased);
+		p->peer_info_struct()->policy_reconnect_pending = false;
 
 		m_peers_to_disconnect.reserve(m_connections.size() + 1);
 		m_connections.reserve(m_connections.size() + 1);
